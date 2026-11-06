@@ -117,3 +117,19 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 - 本地 ARM64 Web/Temporal 镜像构建通过；最终三服务使用 PostgreSQL 16.15，容器冒烟测试通过：非 root、无 Docker socket、API 鉴权、系统 Chromium 空白页、完整源码归档、SQL schema 初始化、合成工作流完成、Temporal 重启后的工作流持久化及终止、Web 重启后的历史/代码/报告读取。所有任务均为合成夹具，不访问真实目标。
 - GitHub Actions 的 AMD64 Worker/协议/11 项 Python 测试、Web/Temporal 镜像构建、三服务重启持久化验收及对应源码归档检查全部通过：[验收记录](https://github.com/4yi-ai/shannon/actions/runs/42178134837)。应用代码验收提交为 `c1c68ab9f965542e03f79fa5c7630c26f0814813`。
 - 本次交付为独立应用代码与部署准备，不代表已在 4YI 发布或安装。真实安装组织、实际 Proposal、实例模型调用、CNI 网络隔离、PVC Pod 重建及授权目标扫描仍待部署验收；未运行真实扫描。
+
+
+## 发布失败排查：密钥、已有数据库与 Temporal 探针
+
+若 Web 日志出现 `SHANNON_API_KEY must contain at least 32 characters`，应在安装实例的 Secret 配置中换成至少 32 字符的独立随机 token，推荐由 32 个随机字节生成。不要缩短应用校验、复用模型网关 key 或把 token 写入仓库。更新后通过正常发布/滚动更新注入新 Secret；网页和 API 客户端也需要换用新 token。不要在日志、工单或聊天中发送 token。
+
+若 PostgreSQL 持续报告 `password authentication failed for user "temporal"`，两个容器的环境变量相同不代表数据库角色密码相同：`POSTGRES_PASSWORD` 只在空数据目录初始化时设置角色密码，更新 Secret 不会修改已有角色。先确认挂载的是预期 PVC、数据库和角色，并备份已有数据库；不要删除、重新初始化或替换 PVC。
+
+由有权限的操作员选择以下一种路径：
+
+1. 若能取得并验证数据库当前有效的旧凭据，将该安装的 PostgreSQL/Temporal Secret 同步回有效凭据，再滚动更新相关服务。
+2. 若需要轮换，用已有的授权数据库管理员连接，通过交互式 `psql` 的 `\password temporal` 更新角色密码，同时协调安装实例的托管 Secret 与 Temporal 配置使用同一新密码。不要把密码放在 shell 参数、SQL 文件、构建参数或发布日志中。无法取得管理员访问权限时交由数据库管理员处理，不能清空卷绕过。
+
+Temporal 的 7233 是 gRPC 端口，不能使用 HTTP `/healthz` 探测。声明已为内部 Temporal 显式设置 `healthPath: "/"`：本地核对的 `catalog-workload.ts` 在 `githubCatalogRuntimeHardening` 开启且 Catalog 内部服务路径为 `/` 时生成 TCP startup/readiness/liveness 探针。**必须在实际 Deployment YAML 中确认是 `tcpSocket` 指向 7233；若部署平台版本或配置未启用该规则，声明本身不会把 HTTP 探针变成 TCP。** 使用平台已有的探针配置入口或由平台运维处理，不修改本项目之外的平台代码。TCP 通过只代表端口开放，还需确认 PostgreSQL 连接、schema 和 Temporal namespace 可用。
+
+重新发布前让 Proposal 重新读取最新声明，检查实例 Secret 和已有 PVC 绑定；不能只刷新旧 Release 的 Publish Gate。发布后验证 Web/Temporal/PostgreSQL Pod 稳定 Ready、重启次数不持续增加、Temporal 日志无认证失败，再查看该 Release 的 smoke 每项检查结果。通过 SSO 的应用根路径应返回实际 Shannon HTML，健康路径应确认来自该 Web Pod；SSO 401 或来源不明的 `/healthz` 200 都不足以证明恢复。保持扫描关闭，直到实例模型与外部网络隔离验收完成。

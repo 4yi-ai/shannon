@@ -28,8 +28,8 @@
         "fsGroup": 1001
       },
       "resources": {
-        "cpu": 2,
-        "memoryMb": 8192
+        "cpu": 1,
+        "memoryMb": 2048
       }
     },
     {

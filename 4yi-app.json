@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "auth": {
+    "bearerPassthroughPrefixes": [
+      "/api"
+    ]
+  },
+  "services": [
+    {
+      "name": "web",
+      "type": "web",
+      "imageSource": "build",
+      "dockerfile": "deploy/4yi/Dockerfile",
+      "context": ".",
+      "route": "public",
+      "port": 8080,
+      "healthPath": "/healthz",
+      "env": {
+        "HOST": "0.0.0.0",
+        "PORT": "8080",
+        "DATA_DIR": "/app/data",
+        "TEMPORAL_ADDRESS": "shannon-temporal:7233",
+        "SHANNON_EXECUTION_ENABLED": "false"
+      },
+      "storage": {
+        "sizeGb": 30,
+        "mountPath": "/app/data",
+        "fsGroup": 1001
+      },
+      "resources": {
+        "cpu": 2,
+        "memoryMb": 8192
+      }
+    },
+    {
+      "name": "temporal",
+      "type": "api",
+      "imageSource": "build",
+      "dockerfile": "Dockerfile",
+      "context": "deploy/4yi/temporal",
+      "route": "internal",
+      "port": 7233,
+      "env": {
+        "DB": "postgres12",
+        "DB_PORT": "5432",
+        "POSTGRES_SEEDS": "shannon-postgres",
+        "POSTGRES_USER": "temporal"
+      },
+      "resources": {
+        "cpu": 1,
+        "memoryMb": 2048
+      }
+    },
+    {
+      "name": "postgres",
+      "type": "postgres",
+      "imageSource": "registry",
+      "image": "public.ecr.aws/docker/library/postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139",
+      "route": "internal",
+      "port": 5432,
+      "env": {
+        "POSTGRES_USER": "temporal",
+        "POSTGRES_DB": "temporal",
+        "PGDATA": "/var/lib/postgresql/data/pgdata"
+      },
+      "storage": {
+        "sizeGb": 20,
+        "mountPath": "/var/lib/postgresql/data"
+      },
+      "resources": {
+        "cpu": 1,
+        "memoryMb": 2048
+      }
+    }
+  ],
+  "models": [
+    {
+      "env": "LLM_MODEL",
+      "type": "chat",
+      "default": "claude-sonnet-4-6"
+    }
+  ]
+}

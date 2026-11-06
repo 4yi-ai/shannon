@@ -1,0 +1,37 @@
+services:
+  web:
+    build: {context: ../.., dockerfile: deploy/4yi/Dockerfile}
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      SHANNON_API_KEY: ${SHANNON_API_KEY:?required}
+      DATA_DIR: /app/data
+      TEMPORAL_ADDRESS: temporal:7233
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
+      SHANNON_AUTHORIZED_ORIGINS: ${SHANNON_AUTHORIZED_ORIGINS:-}
+      SHANNON_EXECUTION_ENABLED: "false"
+    volumes: ["app-data:/app/data"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    init: true
+  temporal:
+    build: ./temporal
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    depends_on: [postgres]
+  postgres:
+    image: public.ecr.aws/docker/library/postgres:16.15-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_DB: temporal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes: ["temporal-data:/var/lib/postgresql/data"]
+volumes:
+  app-data:
+  temporal-data:

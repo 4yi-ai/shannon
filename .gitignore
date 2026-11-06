@@ -5,3 +5,7 @@ credentials/
 dist/
 repos/
 .turbo/
+standalone-data/
+__pycache__/
+*.pyc
+.pnpm-store/

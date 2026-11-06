@@ -1,0 +1,33 @@
+name: Standalone application
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ["apps/standalone/**", "apps/worker/**", "deploy/4yi/**", "4yi-app.json", "pnpm-lock.yaml", ".dockerignore", ".github/workflows/standalone.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: npx --yes pnpm@10.33.0 install --frozen-lockfile
+      - run: npx --yes pnpm@10.33.0 --filter @shannon/worker run build
+      - run: python3 -m unittest apps.standalone.test_standalone -v
+      - run: node deploy/4yi/test-gateway.mjs
+      - run: node --check apps/standalone/web/app.js
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/4yi/Dockerfile -t shannon-standalone:ci .
+      - run: docker build -t shannon-temporal:ci deploy/4yi/temporal
+      - run: python3 deploy/4yi/smoke.py --web-image shannon-standalone:ci --temporal-image shannon-temporal:ci
+      - run: >-
+          docker run --rm --entrypoint python3 shannon-standalone:ci -c
+          "import tarfile; t=tarfile.open('/usr/share/shannon/source.tar.gz'); names=set(t.getnames()); assert all(p in names for p in ['./LICENSE', './THIRD_PARTY_NOTICES.md', './pnpm-lock.yaml', './deploy/4yi/Dockerfile', './apps/standalone/server.py', './apps/worker/src/temporal/worker.ts', './apps/cli/src/commands/start.ts']); assert not any('/node_modules/' in p or p.endswith('/.env') for p in names)"

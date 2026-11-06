@@ -19,7 +19,7 @@ export const BASH_TIMEOUT_EXTENSION_DIR = path.join(import.meta.dirname, 'ai', '
  * Where the CLI mounts a pi model config passed with `--models-config`; its presence is
  * what enables models.json. Must match MODELS_CONFIG_CONTAINER_PATH in the CLI package.
  */
-export const MODELS_CONFIG_PATH = '/app/models.json';
+export const MODELS_CONFIG_PATH = process.env.SHANNON_MODELS_CONFIG || '/app/models.json';
 
 /** Default deliverables subdirectory relative to repoPath */
 export const DEFAULT_DELIVERABLES_SUBDIR = '.shannon/deliverables';
@@ -108,4 +108,4 @@ function findRepoRoot(): string {
 const REPO_ROOT = findRepoRoot();
 
 /** Default root for named scan workspaces; each session's audit directory nests under here. */
-export const WORKSPACES_DIR = path.join(REPO_ROOT, 'workspaces');
+export const WORKSPACES_DIR = process.env.SHANNON_WORKSPACES_DIR || path.join(REPO_ROOT, 'workspaces');

@@ -1,0 +1,203 @@
+import json
+import os
+import re
+import signal
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from .security import extract_zip, public_url
+from .store import TERMINAL
+from .models import gateway_config
+
+PROJECT = Path(__file__).resolve().parents[2]
+
+
+def read_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def outcome(result, report_exists, exit_code):
+    # An exit code alone never establishes completion.
+    status = result.get('status')
+    if exit_code == 0 and status in ('completed', 'partial') and report_exists:
+        return status
+    if status == 'cancelled':
+        return 'cancelled'
+    return 'failed'
+
+
+class Runner:
+    def __init__(self, store, origins, enabled=False):
+        self.store, self.origins, self.enabled = store, origins, enabled
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        self.process = None
+        self.current = None
+
+    def directory(self, task_id):
+        return self.store.root / 'tasks' / task_id
+
+    def terminate_workflow(self, task):
+        if not task.get('workflow_id'):
+            return
+        subprocess.run(['node', str(PROJECT / 'deploy/4yi/terminate.mjs'), task['workflow_id']],
+                       cwd=PROJECT, check=True, timeout=35, capture_output=True)
+
+    def cancel(self, task_id):
+        with self.lock:
+            task = self.store.get(task_id)
+            if task['state'] in TERMINAL:
+                return task
+            state = 'cancelled' if task['state'] == 'queued' else 'cancelling'
+            task = self.store.update(task_id, state=state, pending_terminal='cancelled')
+            if self.current == task_id and self.process and self.process.poll() is None:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            return task
+
+    def wait_for_temporal(self, task_id):
+        deadline = time.monotonic() + 180
+        while not self.stop.is_set() and self.store.get(task_id)['state'] != 'cancelling':
+            try:
+                subprocess.run(['node', str(PROJECT / 'deploy/4yi/terminate.mjs'), '--bootstrap'],
+                               cwd=PROJECT, check=True, timeout=15, capture_output=True)
+                return
+            except (OSError, subprocess.SubprocessError):
+                if time.monotonic() >= deadline:
+                    raise ValueError('Temporal did not become ready within 180 seconds')
+                self.stop.wait(2)
+        raise ValueError('Service stopped or task cancelled before startup')
+
+    def start(self):
+        self.thread = threading.Thread(target=self.loop, daemon=True, name='scan-supervisor')
+        self.thread.start()
+
+    def finish(self, task, state, error=None, **changes):
+        try:
+            self.terminate_workflow(task)
+        except (OSError, subprocess.SubprocessError):
+            self.store.update(task['id'], state='recovering', pending_terminal=state,
+                              error='Waiting for Temporal cleanup', **changes)
+        else:
+            with self.lock:
+                if self.store.get(task['id'])['state'] == 'cancelling':
+                    state, error = 'cancelled', None
+                self.store.update(task['id'], state=state, error=error, **changes)
+
+    def loop(self):
+        # Never silently rerun an interrupted exploit. Clean up its durable workflow first.
+        while not self.stop.is_set():
+            for task in self.store.active():
+                if self.stop.is_set():
+                    return
+                if task['state'] != 'queued':
+                    desired = task.get('pending_terminal', 'cancelled' if task['state'] == 'cancelling' else 'failed')
+                    self.finish(task, desired, None if desired == 'cancelled' else 'Interrupted scan; artifacts preserved')
+                    if self.store.get(task['id'])['state'] not in TERMINAL:
+                        break
+                    continue
+                if self.enabled:
+                    self.run(task)
+            self.stop.wait(2)
+
+    def run(self, task):
+        task_id = task['id']
+        directory = self.directory(task_id)
+        with self.lock:
+            if self.store.get(task_id)['state'] != 'queued':
+                return
+            self.current = task_id
+            self.store.update(task_id, state='preparing')
+        try:
+            self.wait_for_temporal(task_id)
+            # Re-resolve at execution time as well as admission. This does not replace CNI policy.
+            public_url(task['target'], self.origins)
+            directory.mkdir(parents=True, exist_ok=True)
+            if task['source_type'] == 'zip':
+                repo = extract_zip(directory / 'source.zip', directory / 'source')
+            else:
+                public_url(task['repository'])
+                branch = task['branch']
+                if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', branch) or '..' in branch:
+                    raise ValueError('Invalid Git branch')
+                repo = directory / 'source'
+                # Disable redirects, credential helpers, hooks and non-HTTPS transports.
+                env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+                self.execute(['git', '-c', 'http.followRedirects=false', '-c', 'credential.helper=',
+                              '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never',
+                              '-c', 'protocol.https.allow=always', 'clone', '--depth', '1',
+                              '--single-branch', '--branch', branch, '--', task['repository'], str(repo)],
+                             directory, env, directory / 'source.log', 180)
+            if self.store.get(task_id)['state'] == 'cancelling':
+                self.store.update(task_id, state='cancelled')
+                return
+            workflow_id = 'scan_' + task_id + '_shannon-' + str(int(time.time() * 1000))
+            self.store.update(task_id, state='running', workflow_id=workflow_id)
+            model = os.environ['LLM_MODEL']
+            base = (os.environ.get('OPENAI_API_BASE') or os.environ.get('OPENAI_BASE_URL', '')).rstrip('/')
+            if not base or not os.environ.get('OPENAI_API_KEY'):
+                raise ValueError('Per-install gateway credentials are not configured')
+            models = gateway_config(model, base)
+            (directory / 'models.json').write_text(json.dumps(models))
+            (directory / 'workspaces').mkdir(exist_ok=True)
+            result_path = directory / 'result.json'
+            env = dict(os.environ, SHANNON_AI_MODEL='fouryi:' + model,
+                       SHANNON_AI_API_KEY=os.environ['OPENAI_API_KEY'],
+                       SHANNON_AI_BASE_URL=base,
+                       SHANNON_MODELS_CONFIG=str(directory / 'models.json'),
+                       SHANNON_RESULT_PATH=str(result_path),
+                       SHANNON_PROGRESS_PATH=str(directory / 'progress.json'),
+                       SHANNON_WORKSPACES_DIR=str(directory / 'workspaces'))
+            code = self.execute(['node', str(PROJECT / 'apps/worker/dist/temporal/worker.js'), task['target'],
+                                 str(repo), '--task-queue', 'scan-' + task_id, '--workspace', 'scan_' + task_id,
+                                 '--workflow-id', workflow_id, '--output', str(directory / 'reports')],
+                                directory, env, directory / 'worker.log', 14400, scan=True)
+            latest = self.store.get(task_id)
+            if latest['state'] == 'cancelling':
+                self.finish(latest, 'cancelled')
+                return
+            result = read_json(result_path)
+            state = outcome(result, (directory / 'reports/Security-Assessment-Report.md').is_file(), code)
+            self.finish(latest, state, result=result,
+                        error='Scan did not produce a verified terminal result and report' if state == 'failed' else None)
+        except Exception as error:
+            latest = self.store.get(task_id)
+            self.finish(latest, 'cancelled' if latest['state'] == 'cancelling' else 'failed',
+                        error=type(error).__name__ + ': ' + str(error)[:300])
+        finally:
+            with self.lock:
+                self.current, self.process = None, None
+
+    def execute(self, command, cwd, env, log, timeout, scan=False):
+        with log.open('ab') as output:
+            with self.lock:
+                if self.store.get(self.current)['state'] == 'cancelling':
+                    raise ValueError('Cancelled before process start')
+                self.process = subprocess.Popen(command, cwd=cwd, env=env, stdout=output,
+                                                stderr=subprocess.STDOUT, start_new_session=True)
+                process = self.process
+            deadline = time.monotonic() + timeout
+            cancelling_since = None
+            while process.poll() is None:
+                if scan:
+                    self.store.update(self.current, progress=read_json(cwd / 'progress.json'))
+                cancelling = self.stop.is_set() or self.store.get(self.current)['state'] == 'cancelling'
+                if cancelling or time.monotonic() > deadline:
+                    if cancelling_since is None:
+                        cancelling_since = time.monotonic()
+                        os.killpg(process.pid, signal.SIGTERM)
+                    elif time.monotonic() - cancelling_since > 5:
+                        os.killpg(process.pid, signal.SIGKILL)
+                time.sleep(0.25)
+            # Kill descendants left behind by tools even if the worker exited normally.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if not scan and process.returncode:
+                raise ValueError('Source checkout failed; see operator logs')
+            return process.returncode

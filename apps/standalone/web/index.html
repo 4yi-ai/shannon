@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shannon · 独立安全测试</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><strong>SHANNON</strong><span>独立安全测试</span><small>v3.5.0</small></header>
+<main>
+  <h1>安全测试工作台</h1>
+  <p class="intro">结合目标网站与源代码，验证授权范围内的安全风险。</p>
+  <form id="connect" class="connection"><label for="token">API 访问令牌</label><input id="token" type="password" autocomplete="off" required minlength="32" placeholder="输入实例 API 令牌"><button>连接</button><span id="connection-status" role="status">尚未连接</span></form>
+  <p id="notice" role="status" aria-live="polite"></p>
+  <div class="workspace">
+    <section class="panel create"><h2>创建扫描任务</h2>
+      <form id="create">
+        <label for="target">目标网站</label><input id="target" type="url" placeholder="https://example.com" required>
+        <label class="source-label">源代码</label>
+        <div class="segments" role="group" aria-label="源代码方式"><button type="button" id="zip-tab" aria-pressed="true">上传 ZIP</button><button type="button" id="git-tab" aria-pressed="false">Git 仓库</button></div>
+        <div id="zip-source" class="upload"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/></svg><input id="zip" type="file" accept=".zip,application/zip"><label class="file-picker" for="zip">选择 ZIP 文件</label><span id="filename">尚未选择文件</span><p>支持 .zip 格式，包含目标网站对应的源代码，最大 32 MiB。</p></div>
+        <div id="git-source" hidden><label for="repository">Git 仓库地址</label><input id="repository" type="url" placeholder="https://github.com/组织/仓库.git"><label for="branch">分支</label><input id="branch" value="main" maxlength="200"><p class="hint">内部试用支持公开 HTTPS 仓库，私有代码请上传 ZIP。</p></div>
+        <label class="consent"><input id="authorized" type="checkbox" required><span>我已获得测试授权，并确认目标属于允许范围。</span></label>
+        <button class="primary" id="submit" disabled>创建任务</button>
+      </form>
+    </section>
+    <section class="panel tasks"><div class="section-heading"><h2>扫描任务</h2><button type="button" class="quiet" id="refresh">刷新</button></div>
+      <div class="table-wrap"><table><thead><tr><th>目标网站</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="tasks"><tr><td colspan="3" class="empty">连接后查看扫描历史</td></tr></tbody></table></div>
+      <div class="pagination"><button type="button" class="quiet" id="previous" disabled>上一页</button><button type="button" class="quiet" id="next" disabled>下一页</button></div>
+      <section class="detail"><h3>任务详情</h3><div id="detail"><p class="empty">选择任务，查看进度和报告。</p></div></section>
+    </section>
+  </div>
+</main>
+<footer>AGPL-3.0 · <a href="/source">对应源码</a> · Copyright © 2026 Keygraph, Inc.</footer>
+<script src="/app.js"></script>
+</body></html>

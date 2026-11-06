@@ -1,4 +1,7 @@
 > [!NOTE]
+> **4YI 独立应用适配（内部试用准备）**：网页、持久化任务 API、无 Docker socket 执行与 SQL-backed Temporal 的说明见 [独立应用部署指南](docs/4yi-standalone.md)。固定上游 v3.5.0；扫描默认关闭，必须先验证授权范围与外部网络隔离。本阶段未接入 Security Center。
+
+> [!NOTE]
 > **[php2shell upgrade verification](docs/exp-php2shell.md):** confirm your PHP apps are patched against the php2shell RCE chain with the experimental `--exp-php2shell` probe. See the [test results](docs/exp-php2shell-testing.md).
 
 <div align="center">

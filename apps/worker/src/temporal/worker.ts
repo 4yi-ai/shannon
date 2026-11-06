@@ -28,7 +28,7 @@
  *   TEMPORAL_ADDRESS - Temporal server address (default: localhost:7233)
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client, Connection, type WorkflowHandle, WorkflowNotFoundError } from '@temporalio/client';
@@ -100,6 +100,14 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PROGRESS_QUERY = 'getProgress';
+
+/** Optional standalone receipts: a successful process exit is not a scan verdict. */
+function writeStandaloneReceipt(destination: string | undefined, value: unknown): void {
+  if (!destination) return;
+  const temporary = `${destination}.tmp-${process.pid}`;
+  writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+  renameSync(temporary, destination);
+}
 
 /** Accept only a code shaped like a stable error code, or a known provider-failure category; anything else is treated as absent rather than printed. */
 function safeFailureCode(value: string | undefined): string | undefined {
@@ -617,6 +625,7 @@ async function waitForWorkflowResult(
   const progressInterval = setInterval(async () => {
     try {
       const progress = await handle.query<PipelineProgress>(PROGRESS_QUERY);
+      writeStandaloneReceipt(process.env.SHANNON_PROGRESS_PATH, progress);
       const elapsed = Math.floor(progress.elapsedMs / 1000);
       const expectedCount = progress.expectedAgents.length;
       // Agentic SAST runs alongside the phase above, so the line names it while it is working.
@@ -632,6 +641,12 @@ async function waitForWorkflowResult(
   try {
     const result = await handle.result();
     clearInterval(progressInterval);
+    writeStandaloneReceipt(process.env.SHANNON_RESULT_PATH, {
+      status: result.status,
+      partialReasons: result.partialReasons,
+      summary: result.summary,
+      agenticSast: result.agenticSast,
+    });
 
     // The returned workflow state distinguishes completed, partial, and cancelled runs;
     // each prints its own terminal line so degradation is never labelled as full success.

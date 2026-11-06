@@ -66,7 +66,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 内部试用的步骤：
 
-1. 本地构建独立镜像和 Temporal 镜像；运行控制层与协议测试。`.github/workflows/standalone.yml` 提供相同的 CI 检查及对应源码归档完整性检查（尚未在远程运行）。
+1. 本地构建独立镜像和 Temporal 镜像；运行控制层与协议测试。`.github/workflows/standalone.yml` 提供相同的 CI 检查及对应源码归档完整性检查。
 2. 代码验收后推送至已确认的 `4yi-ai/shannon`；安装前再确认 4YI 组织、安装方式和授权测试环境。
 3. Analyze 核实三服务、两独立 PVC、模型槽、Secret 契约及真实 DNS；先 Review Proposal 再 Apply。
 4. 创建固定 commit 的 Release，仅在内部组织安装，执行仍保持关闭。
@@ -115,5 +115,5 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 - 本机 Chrome/Playwright 验证：鉴权、任务列表/详情、Markdown 下载、Git 表单、创建、排队取消、桌面与 390px 手机布局通过；无 JavaScript 运行错误。测试任务和报告均为夹具数据。
 - xclaw 实际声明解析器、仓库扫描器、离线 Proposal 生成检查通过，没有修改 xclaw 文件或访问平台数据库。
 - 本地 ARM64 Web/Temporal 镜像构建通过；最终三服务使用 PostgreSQL 16.15，容器冒烟测试通过：非 root、无 Docker socket、API 鉴权、系统 Chromium 空白页、完整源码归档、SQL schema 初始化、合成工作流完成、Temporal 重启后的工作流持久化及终止、Web 重启后的历史/代码/报告读取。所有任务均为合成夹具，不访问真实目标。
-- 已配置 GitHub Actions 在 `main` 推送时构建及验收 AMD64；远程结果尚未核验，本地 ARM64 结果不能替代 AMD64 验收。
+- GitHub Actions 的 AMD64 Worker/协议/11 项 Python 测试、Web/Temporal 镜像构建、三服务重启持久化验收及对应源码归档检查全部通过：[验收记录](https://github.com/4yi-ai/shannon/actions/runs/42178134837)。应用代码验收提交为 `c1c68ab9f965542e03f79fa5c7630c26f0814813`。
 - 本次交付为独立应用代码与部署准备，不代表已在 4YI 发布或安装。真实安装组织、实际 Proposal、实例模型调用、CNI 网络隔离、PVC Pod 重建及授权目标扫描仍待部署验收；未运行真实扫描。

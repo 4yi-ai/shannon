@@ -14,7 +14,7 @@
       "context": ".",
       "route": "public",
       "port": 8080,
-      "healthPath": "/healthz",
+      "healthPath": "/shannon-healthz",
       "env": {
         "HOST": "0.0.0.0",
         "PORT": "8080",
@@ -50,7 +50,7 @@
         "cpu": 1,
         "memoryMb": 2048
       },
-      "healthPath": "/"
+      "healthPath": "/healthz"
     },
     {
       "name": "postgres",

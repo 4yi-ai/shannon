@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='shannon-smoke-') as tmp:
             headers={'Authorization':'Bearer '+api_key} if authenticated else {}
             with urllib.request.urlopen(urllib.request.Request(base+path,headers=headers),timeout=5) as response:
                 return response.read()
-        ready(lambda:request('/healthz',False))
+        ready(lambda:request('/shannon-healthz',False))
         assert json.loads(request('/api/v1/config'))['execution_enabled'] is False
         try:
             request('/api/v1/tasks',False)
@@ -67,20 +67,50 @@ with tempfile.TemporaryDirectory(prefix='shannon-smoke-') as tmp:
         source = tarfile.open(fileobj=io.BytesIO(request('/source')))
         names = set(source.getnames())
         assert all(name in names for name in ['./LICENSE','./THIRD_PARTY_NOTICES.md','./pnpm-lock.yaml',
-                   './deploy/4yi/Dockerfile','./apps/standalone/server.py','./apps/cli/src/commands/start.ts'])
+                   './deploy/4yi/Dockerfile','./deploy/4yi/temporal/supervisor.py','./apps/standalone/server.py','./apps/cli/src/commands/start.ts'])
         assert not any('/node_modules/' in name or name.endswith('/.env') for name in names)
         run(['exec','-T','web','sh','-c','test "$(id -u)" = 1001 && test ! -e /var/run/docker.sock'])
         browser = run(['exec','-T','-w','/app/data','web','playwright-cli','open','about:blank'],text=True,timeout=60)
         assert 'about:blank' in browser.stdout and 'Error:' not in browser.stdout
         run(['exec','-T','-w','/app/data','web','playwright-cli','close-all'],timeout=30)
         print('PASS: auth, source archive, non-root browser on about:blank', flush=True)
+        health_command = ['exec','-T','web','python3','-c',
+            "import json,urllib.request; v=json.load(urllib.request.urlopen('http://temporal:7233/healthz',timeout=5)); assert v['service']=='shannon-temporal' and v['status']=='ready'"]
+        ready(lambda:run(health_command),240)
+        print('PASS: HTTP/1 health probe on the declared Temporal gRPC port', flush=True)
         ready(lambda:run(['exec','-T','web','node','/app/deploy/4yi/terminate.mjs','--bootstrap']),240)
         output = run(['exec','-T','web','node','/app/deploy/4yi/test-temporal.mjs'],text=True,timeout=90).stdout
         workflow_id = next(line.split('=',1)[1] for line in output.splitlines() if line.startswith('PENDING_WORKFLOW='))
-        run(['restart','temporal'],timeout=90)
+        run(['up','-d','--no-deps','--force-recreate','postgres','temporal'],timeout=90)
         ready(lambda:run(['exec','-T','web','node','/app/deploy/4yi/terminate.mjs','--health']),240)
         run(['exec','-T','web','node','/app/deploy/4yi/test-temporal.mjs','verify',workflow_id],timeout=60)
         print('PASS: SQL workflow survived Temporal restart and terminated', flush=True)
+        original_password = config['services']['temporal']['environment']['POSTGRES_PASSWORD']
+        wrong_password = secrets.token_hex(32)
+        config['services']['temporal']['environment']['POSTGRES_PASSWORD'] = wrong_password
+        override.write_text(json.dumps(config))
+        run(['up','-d','--no-deps','--force-recreate','temporal'],timeout=90)
+        unhealthy_code = """import urllib.request, urllib.error
+try:
+    urllib.request.urlopen('http://temporal:7233/healthz',timeout=5)
+    raise AssertionError('Bad DB credential must not pass health')
+except urllib.error.HTTPError as error:
+    assert error.code == 503
+"""
+        unhealthy = ['exec','-T','web','python3','-c',unhealthy_code]
+        ready(lambda:run(unhealthy),30)
+        def authentication_rejected():
+            output = run(['logs','--no-color','temporal'],text=True).stdout
+            if 'database_authentication_failed' not in output:
+                raise OSError('Waiting for credential mismatch diagnosis')
+        ready(authentication_rejected,30)
+        config['services']['temporal']['environment']['POSTGRES_PASSWORD'] = original_password
+        override.write_text(json.dumps(config))
+        run(['up','-d','--no-deps','--force-recreate','temporal'],timeout=90)
+        ready(lambda:run(health_command),240)
+        ready(lambda:run(['exec','-T','web','node','/app/deploy/4yi/terminate.mjs','--health']),120)
+        print('PASS: credential mismatch reports unready; original credential restores existing database without deleting PVC', flush=True)
+
         seed = """from apps.standalone.store import Store
 from pathlib import Path
 import os, zipfile
@@ -97,7 +127,7 @@ print(task['id'])
         task_id = run(['exec','-T','web','python3','-c',seed],text=True).stdout.strip()
         run(['restart','web'],timeout=90)
         base = web_address()
-        ready(lambda:request('/healthz',False))
+        ready(lambda:request('/shannon-healthz',False))
         task = json.loads(request('/api/v1/tasks/'+task_id))
         assert task['state']=='completed' and task['reports']['markdown']
         assert request('/api/v1/tasks/'+task_id+'/reports/markdown')==b'# Persisted container fixture'
@@ -107,7 +137,7 @@ print(task['id'])
         logs = subprocess.run(compose+['logs','--tail','60'],env=environment,capture_output=True,text=True)
         # Do not expose even accidentally logged credentials in a failed test.
         details = ''.join(value.decode(errors='replace') if isinstance(value, bytes) else value for value in (getattr(error, 'stdout', '') or '', getattr(error, 'stderr', '') or ''))
-        text = (logs.stdout+logs.stderr+details).replace(api_key,'[REDACTED]').replace(environment['POSTGRES_PASSWORD'],'[REDACTED]')
+        text = (logs.stdout+logs.stderr+details).replace(api_key,'[REDACTED]').replace(environment['POSTGRES_PASSWORD'],'[REDACTED]').replace(locals().get('wrong_password','__no_fixture_password__'),'[REDACTED]')
         print(text)
         raise
     finally:

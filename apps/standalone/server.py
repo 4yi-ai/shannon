@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -54,8 +55,19 @@ def make_handler(store, runner, api_key):
             self.wfile.write(body)
 
         def authorized(self):
+            if len(api_key) < 32:
+                return False
             supplied = self.headers.get('Authorization', '')
             return hmac.compare_digest(supplied.encode(), ('Bearer ' + api_key).encode())
+
+        def require_auth(self):
+            if len(api_key) < 32:
+                self.send(503, {'error': 'API unavailable: configure SHANNON_API_KEY with at least 32 characters and restart the service'})
+                return False
+            if not self.authorized():
+                self.send(401, {'error': 'Bearer token required'})
+                return False
+            return True
 
         def do_GET(self):
             try:
@@ -68,8 +80,10 @@ def make_handler(store, runner, api_key):
         def get(self):
             parsed = urlsplit(self.path)
             path = parsed.path
-            if path == '/healthz':
-                self.send(200, {'status': 'ok'})
+            if path in ('/healthz', '/shannon-healthz'):
+                self.send(200, {'status': 'ok', 'service': 'shannon',
+                                'api_configured': len(api_key) >= 32,
+                                'execution_enabled': runner.enabled and len(api_key) >= 32})
                 return
             if path in ('/', '/app.js', '/style.css'):
                 name = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
@@ -80,8 +94,7 @@ def make_handler(store, runner, api_key):
                 self.send(200, Path(os.environ.get('SHANNON_SOURCE_ARCHIVE', '/usr/share/shannon/source.tar.gz')).read_bytes(),
                           'application/gzip', 'shannon-corresponding-source.tar.gz')
                 return
-            if not self.authorized():
-                self.send(401, {'error': 'Bearer token required'})
+            if not self.require_auth():
                 return
             if path == '/api/v1/config':
                 self.send(200, {'execution_enabled': runner.enabled, 'model': os.environ.get('LLM_MODEL'),
@@ -104,8 +117,7 @@ def make_handler(store, runner, api_key):
                     self.send(200, self.view_task(task))
 
         def do_POST(self):
-            if not self.authorized():
-                self.send(401, {'error': 'Bearer token required'})
+            if not self.require_auth():
                 return
             try:
                 self.post()
@@ -178,12 +190,15 @@ def make_handler(store, runner, api_key):
 def main():
     os.umask(0o077)
     api_key = os.environ.get('SHANNON_API_KEY', '')
-    if len(api_key) < 32:
-        raise SystemExit('SHANNON_API_KEY must contain at least 32 characters')
+    api_configured = len(api_key) >= 32
+    if not api_configured:
+        print('API disabled: SHANNON_API_KEY must contain at least 32 characters; Web remains available', file=sys.stderr, flush=True)
     origins = {value.strip().rstrip('/') for value in os.environ.get('SHANNON_AUTHORIZED_ORIGINS', '').split(',') if value.strip()}
     enabled = os.environ.get('SHANNON_EXECUTION_ENABLED') == 'true'
     if enabled and (not origins or os.environ.get('SHANNON_EGRESS_POLICY_VERIFIED') != 'true'):
-        raise SystemExit('Execution requires authorized origins and verified external egress isolation')
+        print('Execution disabled: configure authorized origins and verify external egress isolation', file=sys.stderr, flush=True)
+        enabled = False
+    enabled = enabled and api_configured
     store = Store(os.environ.get('DATA_DIR', './standalone-data'))
     supervisor_lock = (store.root / '.supervisor.lock').open('a')
     try:

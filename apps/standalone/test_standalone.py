@@ -40,6 +40,9 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(roundtrip['persistence']['datastores']['main']['sql']['password'],secret)
         self.assertEqual(config['persistence']['datastores']['main']['sql']['pluginName'],'postgres12')
         self.assertEqual(config['services']['frontend']['rpc']['grpcPort'],7233)
+        internal = module.configuration({'POSTGRES_PASSWORD':secret,'TEMPORAL_FRONTEND_PORT':'17233'},'172.18.0.2')
+        self.assertEqual(internal['services']['frontend']['rpc'], {'grpcPort':17233,'membershipPort':6933,'bindOnIP':'127.0.0.1'})
+        self.assertEqual(internal['publicClient']['hostPort'],'127.0.0.1:17233')
         self.assertEqual(module.version_tuple('1.17'),(1,17))
         with self.assertRaises(ValueError):
             module.version_tuple('unsafe version')
@@ -193,6 +196,44 @@ class RunnerTests(unittest.TestCase):
 
 
 class RestartTests(unittest.TestCase):
+    def test_invalid_token_keeps_http_up_but_blocks_all_api_and_execution(self):
+        for token in ('', 'x'*22):
+            with self.subTest(token_length=len(token)), tempfile.TemporaryDirectory() as tmp:
+                with socket.socket() as probe:
+                    probe.bind(('127.0.0.1', 0))
+                    port = probe.getsockname()[1]
+                env = dict(os.environ, DATA_DIR=tmp, HOST='127.0.0.1', PORT=str(port),
+                           SHANNON_API_KEY=token, SHANNON_EXECUTION_ENABLED='true',
+                           SHANNON_AUTHORIZED_ORIGINS='https://fixture.example', SHANNON_EGRESS_POLICY_VERIFIED='true')
+                process = subprocess.Popen([sys.executable,'-B','-m','apps.standalone.server'],env=env,
+                                           stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                base = f'http://127.0.0.1:{port}'
+                try:
+                    for attempt in range(100):
+                        try:
+                            with urllib.request.urlopen(base+'/shannon-healthz',timeout=.5) as response:
+                                health = json.load(response)
+                            break
+                        except OSError:
+                            time.sleep(.05)
+                    else:
+                        self.fail('Web must start even when the API credential is invalid')
+                    self.assertFalse(health['api_configured'])
+                    self.assertFalse(health['execution_enabled'])
+                    with urllib.request.urlopen(base+'/') as response:
+                        self.assertIn(b'<!doctype html>',response.read().lower())
+                    for path, body in [('/api/v1/tasks',None),('/api/v1/tasks',b'{}'),('/api/v1/tasks/'+'a'*32+'/cancel',b'{}')]:
+                        request = urllib.request.Request(base+path, data=body, headers={'Authorization':'Bearer '+token})
+                        with self.assertRaises(urllib.error.HTTPError) as error:
+                            urllib.request.urlopen(request)
+                        self.assertEqual(error.exception.code,503)
+                    store = Store(tmp)
+                    self.assertEqual(store.list(),[])
+                    store.db.close()
+                finally:
+                    process.terminate()
+                    process.communicate(timeout=10)
+
     def test_process_restart_preserves_history_source_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(tmp)

@@ -3,6 +3,7 @@
 FROM public.ecr.aws/docker/library/postgres:16.15-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
 USER root
 RUN apk add --no-cache python3 curl ca-certificates
+RUN apk add --no-cache nginx
 ARG TARGETARCH
 RUN --mount=type=cache,id=shannon-temporal-1.29.1,target=/downloads \
     set -eu; \
@@ -25,5 +26,6 @@ RUN --mount=type=cache,id=shannon-temporal-1.29.1,target=/downloads \
     rm -rf /tmp/temporal-source; \
     temporal-server --version
 COPY server.py /etc/temporal/standalone-server.py
+COPY supervisor.py /etc/temporal/supervisor.py
 USER postgres
-ENTRYPOINT ["python3", "/etc/temporal/standalone-server.py"]
+ENTRYPOINT ["python3", "/etc/temporal/supervisor.py"]

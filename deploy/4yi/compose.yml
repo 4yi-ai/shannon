@@ -1,5 +1,7 @@
 services:
   web:
+    cpus: 1
+    mem_limit: 2g
     build: {context: ../.., dockerfile: deploy/4yi/Dockerfile}
     ports: ["127.0.0.1:8080:8080"]
     environment:
@@ -16,6 +18,8 @@ services:
     cap_drop: ["ALL"]
     init: true
   temporal:
+    cpus: 1
+    mem_limit: 2g
     build: ./temporal
     environment:
       DB: postgres12
@@ -25,6 +29,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
     depends_on: [postgres]
   postgres:
+    cpus: 1
+    mem_limit: 2g
     image: public.ecr.aws/docker/library/postgres:16.15-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
     environment:
       POSTGRES_USER: temporal

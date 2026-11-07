@@ -11,6 +11,7 @@ import time
 
 
 def configuration(environ, address):
+    frontend_port = int(environ.get('TEMPORAL_FRONTEND_PORT', '7233'))
     host = environ.get('POSTGRES_SEEDS', 'shannon-postgres')
     port = int(environ.get('DB_PORT', '5432'))
     password = environ['POSTGRES_PASSWORD']
@@ -25,14 +26,14 @@ def configuration(environ, address):
         'persistence': {'defaultStore': 'main', 'visibilityStore': 'visibility', 'numHistoryShards': 128,
                         'datastores': {'main': sql('temporal', 10), 'visibility': sql('temporal_visibility', 2)}},
         'global': {'membership': {'maxJoinDuration': '30s', 'broadcastAddress': address}},
-        'services': {name: {'rpc': {'grpcPort': grpc, 'membershipPort': member, 'bindOnIP': '0.0.0.0'}}
-                     for name, grpc, member in [('frontend', 7233, 6933), ('history', 7234, 6934),
+        'services': {name: {'rpc': {'grpcPort': grpc, 'membershipPort': member, 'bindOnIP': '127.0.0.1' if name == 'frontend' and frontend_port != 7233 else '0.0.0.0'}}
+                     for name, grpc, member in [('frontend', frontend_port, 6933), ('history', 7234, 6934),
                                                 ('matching', 7235, 6935), ('worker', 7239, 6939)]},
         'clusterMetadata': {'enableGlobalNamespace': False, 'failoverVersionIncrement': 10,
                             'masterClusterName': 'active', 'currentClusterName': 'active',
                             'clusterInformation': {'active': {'enabled': True, 'initialFailoverVersion': 1,
-                                                              'rpcName': 'frontend', 'rpcAddress': '127.0.0.1:7233'}}},
-        'publicClient': {'hostPort': '127.0.0.1:7233'},
+                                                              'rpcName': 'frontend', 'rpcAddress': f'127.0.0.1:{frontend_port}'}}},
+        'publicClient': {'hostPort': f'127.0.0.1:{frontend_port}'},
         'dcRedirectionPolicy': {'policy': 'noop'},
         'archival': {'history': {'state': 'disabled', 'enableRead': False},
                      'visibility': {'state': 'disabled', 'enableRead': False}},
@@ -63,14 +64,21 @@ def main():
         result = subprocess.run(psql + ['-d', database, '-c', statement], env=database_env,
                                 capture_output=True, text=True, timeout=30)
         if result.returncode:
-            raise RuntimeError('PostgreSQL operation failed; verify readiness, credentials and schema')
+            if 'password authentication failed' in result.stderr:
+                raise RuntimeError('database_authentication_failed')
+            raise RuntimeError('database_connection_failed')
         return result.stdout.strip()
     deadline = time.monotonic() + 180
+    last_database_error = None
     while True:
         try:
             query('postgres', 'SELECT 1')
             break
-        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            reason = str(error) if isinstance(error, RuntimeError) else 'database_unavailable'
+            if reason != last_database_error:
+                print('Temporal startup blocked: ' + reason + '; verify the existing database role and per-install Secret; PVC is preserved', flush=True)
+                last_database_error = reason
             if time.monotonic() >= deadline:
                 raise SystemExit('PostgreSQL did not become ready within 180 seconds')
             time.sleep(2)

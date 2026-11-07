@@ -62,7 +62,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 不可假设 Codescan 专用 Secrets 表单适用于 Shannon，也不能把它的共享 key 或固定数据库密码写进声明。Apply 前检查 Proposal 的 consumer secrets 与平台运行时推断。如果现有入口无法为 Shannon 配置应用/数据库 Secret，视为安装阻塞，不能以明文密码绕过。
 
-`4yi-app.json` 当前内部 DNS 假设 slug 为 `shannon`；Apply 前以真实 Proposal 为准改 `TEMPORAL_ADDRESS` 与 `POSTGRES_SEEDS`。公共服务必须只有 Web，Temporal 和数据库都不能公开。健康检查 `/healthz` 快速且无鉴权；它只反映 HTTP 控制层可用，不代表 Temporal/模型可执行。
+`4yi-app.json` 当前内部 DNS 假设 slug 为 `shannon`；Apply 前以真实 Proposal 为准改 `TEMPORAL_ADDRESS` 与 `POSTGRES_SEEDS`。公共服务必须只有 Web，Temporal 和数据库都不能公开。Web 健康路径为 `/shannon-healthz`，避免被平台路由器的全局 `/healthz` 截获；响应包含 `service: shannon`、`api_configured`、`execution_enabled`。200 只证明控制层可用，不代表凭据、Temporal 或模型就绪。旧 `/healthz` 保留作应用直连兼容路径。
 
 内部试用的步骤：
 
@@ -83,7 +83,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 ## API 契约（后续 PIAQEE 接入）
 
-除 `/healthz`、静态页面与对应源码下载 `/source` 外，所有 API 都要求 `Authorization: Bearer <SHANNON_API_KEY>`，不信任客户端伪造的组织 Header。每个组织安装独立实例和独立 token；本阶段无共享多租户路由。
+除 `/shannon-healthz`、兼容路径 `/healthz`、静态页面与对应源码下载 `/source` 外，所有 API 都要求 `Authorization: Bearer <SHANNON_API_KEY>`，不信任客户端伪造的组织 Header。每个组织安装独立实例和独立 token；本阶段无共享多租户路由。
 
 | 方法与路径 | 返回 |
 | --- | --- |
@@ -110,7 +110,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 ## 本轮验证与尚未完成项
 
 - 锁定依赖安装、上游 Worker TypeScript 构建、前端 JavaScript 语法检查通过。
-- 11 项 Python 测试通过，包括真实 HTTP 进程重启后的历史、代码、报告读取，以及第二监督器进程被锁拒绝。
+- 12 项 Python 测试通过，包括真实 HTTP 进程重启后的历史、代码、报告读取，以及第二监督器进程被锁拒绝。
 - 实际锁定 Pi runtime + 本地模型夹具验证：自定义模型注册、实例 Bearer token、`/chat/completions` SSE、工具调用及工具结果回传通过。没有调用真实模型或扫描真实目标。
 - 本机 Chrome/Playwright 验证：鉴权、任务列表/详情、Markdown 下载、Git 表单、创建、排队取消、桌面与 390px 手机布局通过；无 JavaScript 运行错误。测试任务和报告均为夹具数据。
 - xclaw 实际声明解析器、仓库扫描器、离线 Proposal 生成检查通过，没有修改 xclaw 文件或访问平台数据库。
@@ -119,9 +119,9 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 - 本次交付为独立应用代码与部署准备，不代表已在 4YI 发布或安装。真实安装组织、实际 Proposal、实例模型调用、CNI 网络隔离、PVC Pod 重建及授权目标扫描仍待部署验收；未运行真实扫描。
 
 
-## 发布失败排查：密钥、已有数据库与 Temporal 探针
+## 发布失败排查：密钥、已有数据库与 Temporal 探针（2026-11-07 更新）
 
-若 Web 日志出现 `SHANNON_API_KEY must contain at least 32 characters`，应在安装实例的 Secret 配置中换成至少 32 字符的独立随机 token，推荐由 32 个随机字节生成。不要缩短应用校验、复用模型网关 key 或把 token 写入仓库。更新后通过正常发布/滚动更新注入新 Secret；网页和 API 客户端也需要换用新 token。不要在日志、工单或聊天中发送 token。
+空密钥或不足 32 字符时，新版 Web 继续启动网页和健康接口，日志只给出不含密钥的配置提示，所有受保护 API 返回 503，扫描强制关闭。仍需在安装实例的 Secret 配置中设置至少 32 字符的独立随机 token，推荐由 32 个随机字节生成；不能把“网页可访问”视为 API 已配置好。不要复用模型网关 key 或把 token 写入仓库。更新后滚动重启 Web，网页和 API 客户端也需要换用新 token。不要在日志、工单或聊天中发送 token。
 
 若 PostgreSQL 持续报告 `password authentication failed for user "temporal"`，两个容器的环境变量相同不代表数据库角色密码相同：`POSTGRES_PASSWORD` 只在空数据目录初始化时设置角色密码，更新 Secret 不会修改已有角色。先确认挂载的是预期 PVC、数据库和角色，并备份已有数据库；不要删除、重新初始化或替换 PVC。
 
@@ -130,6 +130,17 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 1. 若能取得并验证数据库当前有效的旧凭据，将该安装的 PostgreSQL/Temporal Secret 同步回有效凭据，再滚动更新相关服务。
 2. 若需要轮换，用已有的授权数据库管理员连接，通过交互式 `psql` 的 `\password temporal` 更新角色密码，同时协调安装实例的托管 Secret 与 Temporal 配置使用同一新密码。不要把密码放在 shell 参数、SQL 文件、构建参数或发布日志中。无法取得管理员访问权限时交由数据库管理员处理，不能清空卷绕过。
 
-Temporal 的 7233 是 gRPC 端口，不能使用 HTTP `/healthz` 探测。声明已为内部 Temporal 显式设置 `healthPath: "/"`：本地核对的 `catalog-workload.ts` 在 `githubCatalogRuntimeHardening` 开启且 Catalog 内部服务路径为 `/` 时生成 TCP startup/readiness/liveness 探针。**必须在实际 Deployment YAML 中确认是 `tcpSocket` 指向 7233；若部署平台版本或配置未启用该规则，声明本身不会把 HTTP 探针变成 TCP。** 使用平台已有的探针配置入口或由平台运维处理，不修改本项目之外的平台代码。TCP 通过只代表端口开放，还需确认 PostgreSQL 连接、schema 和 Temporal namespace 可用。
+新版 Temporal 声明 `healthPath: "/healthz"`，不再依赖平台将 HTTP 探针转成 TCP。镜像内非 root NGINX 在同一个 7233 端口提供 HTTP/1 健康检查和 HTTP/2 gRPC，gRPC 转发到同容器回环地址 17233。健康处理器检查实际 Temporal 端口与 PostgreSQL `SELECT 1`，未就绪返回 503，就绪返回 200。无需新增 Service 端口、共享目录或平台代码改动。必须确认最终 Deployment 使用 7233 `/healthz` HTTP 探针；若仍为旧 `/`，重新 Analyze、Apply 并创建使用最新提交的 Release。
 
 重新发布前让 Proposal 重新读取最新声明，检查实例 Secret 和已有 PVC 绑定；不能只刷新旧 Release 的 Publish Gate。发布后验证 Web/Temporal/PostgreSQL Pod 稳定 Ready、重启次数不持续增加、Temporal 日志无认证失败，再查看该 Release 的 smoke 每项检查结果。通过 SSO 的应用根路径应返回实际 Shannon HTML，健康路径应确认来自该 Web Pod；SSO 401 或来源不明的 `/healthz` 200 都不足以证明恢复。保持扫描关闭，直到实例模型与外部网络隔离验收完成。
+
+## 与成功部署项目再次对照
+
+2026-11-07 只读核对了 `pentagi` 的 `origin/4yi-marketplace` 声明和指南、`piaqee-codescan` 的声明及 API 鉴权实现、`trivy` 声明。保留单公网 Web、内部后端、独立 PVC、非 root 与每实例凭据；没有复制示例固定数据库密码。
+
+- Web 参照 Codescan 分离 HTTP 启动和 API 授权：凭据不合规不再 CrashLoop，但拒绝所有 API，禁止扫描。
+- Temporal 按 PentAGI 内部 executor 的显式 HTTP 健康接口方式适配现有平台。使用 [NGINX gRPC 模块](https://nginx.org/en/docs/http/ngx_http_grpc_module.html)与 [HTTP/2 支持](https://nginx.org/en/docs/http/ngx_http_v2_module.html)在同一声明端口提供 HTTP 探针与 gRPC；NGINX 或 Temporal 子进程退出时监督器停止另一个子进程，收到 SIGTERM 时协调关闭。后端端口仅监听回环地址。
+- Compose 对每服务施加与声明一致的 1 CPU、2 GiB 限制。验收包含相同 Secret/PVC 下强制重建 Postgres 与 Temporal、工作流持久化、错误密码时 HTTP 503，以及恢复原 Secret 后不删除卷即可重新就绪。
+- 本地 xclaw 当前代码在 `githubCatalogRuntimeHardening` 启用时保留重新 Apply 前的托管 Postgres 密码。Shannon 使用统一 `POSTGRES_PASSWORD` 契约；不会猜测、自动重置已有角色密码，也不保存另一份凭据来掩盖漂移。已经不匹配的旧实例仍需按上一节同步有效凭据，镜像无法恢复数据库中的原明文密码。
+
+这些检查不等于线上安装验收。发布前仍需确认 API 配置、真实实例模型和外部网络隔离；没有在本次改造中操作线上 Secret、数据库或 PVC。

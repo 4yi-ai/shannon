@@ -965,9 +965,9 @@ export async function runAuthenticationValidation(input: ActivityInput): Promise
     const container = getOrCreateContainer(input.workflowId, sessionMetadata, buildContainerConfig(input));
     const configResult = await container.configLoader.loadOptional(input.configPath, undefined, input.configYAML);
     if (isErr(configResult)) {
-      // runPreflightValidation already validated parsing, so this is unexpected.
-      logger.warn(`runAuthenticationValidation: config load failed unexpectedly: ${configResult.error.message}`);
-      return null;
+      // A config that disappears or becomes unreadable after preflight must not
+      // silently turn an authenticated engagement into an anonymous scan.
+      throw configResult.error;
     }
 
     const distributedConfig = configResult.value;

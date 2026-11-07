@@ -12,6 +12,7 @@ async function api(path, body) {
 }
 function badge(state) { return node('span', labels[state]||state, 'badge '+state); }
 function switchSource(type) { sourceType=type; $('zip-source').hidden=type!=='zip'; $('git-source').hidden=type!=='git'; $('zip-tab').setAttribute('aria-pressed',String(type==='zip')); $('git-tab').setAttribute('aria-pressed',String(type==='git')); $('repository').required=type==='git'; }
+$('login-enabled').onchange=()=>{const enabled=$('login-enabled').checked;$('login-fields').hidden=!enabled;for(const id of ['login-url','login-username','login-password','login-flow','login-success'])$(id).required=enabled;if(!enabled){$('login-password').value='';$('login-totp').value='';}};
 $('zip-tab').onclick=()=>switchSource('zip'); $('git-tab').onclick=()=>switchSource('git');
 async function connect() {
   clearTimeout(timer);
@@ -49,7 +50,7 @@ $('previous').onclick=()=>{offset=Math.max(0,offset-20);refresh();}; $('next').o
 function renderDetail(task) {
   const root=$('detail');root.replaceChildren(); const dl=node('dl');
   const add=(title,value)=>{dl.append(node('dt',title),node('dd',value));};
-  add('目标网站',task.target); const state=node('dd');state.append(badge(task.state));dl.append(node('dt','任务状态'),state);
+  add('目标网站',task.target); add('登录测试',task.authenticated_scan?'已配置专用测试账号':'未配置'); const state=node('dd');state.append(badge(task.state));dl.append(node('dt','任务状态'),state);
   const progress=task.progress||{}; add('当前阶段',phases[progress.currentPhase]||progress.currentPhase||labels[task.state]);
   const total=progress.expectedAgents?.length||0, done=(progress.completedAgents?.length||0)+(progress.skippedAgents?.length||0);
   add('已处理 Agent',total?done+' / '+total:'等待进度信息');root.append(dl);
@@ -60,6 +61,6 @@ function renderDetail(task) {
   for(const [type,label] of [['markdown','下载 Markdown'],['pdf','下载 PDF']]){const button=node('button',label,'download');button.disabled=!task.reports?.[type];button.onclick=async()=>{try{const blob=await (await api('/tasks/'+task.id+'/reports/'+type)).blob();const url=URL.createObjectURL(blob);const link=node('a');link.href=url;link.download='Security-Assessment-Report.'+(type==='pdf'?'pdf':'md');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){notice(error.message,true);}};actions.append(button);}root.append(actions);
 }
 async function encodeFile(file){const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(binary);}
-$('create').onsubmit=async(event)=>{event.preventDefault();if(!config?.execution_enabled)return;$('submit').disabled=true;try{const body={target:$('target').value,source_type:sourceType,authorization_confirmed:$('authorized').checked};if(sourceType==='zip'){const file=$('zip').files[0];if(!file||file.size>32*1024*1024)throw new Error('请选择不超过 32 MiB 的 ZIP 文件');body.zip_base64=await encodeFile(file);}else{body.repository=$('repository').value;body.branch=$('branch').value;}const task=await(await api('/tasks',body)).json();selected=task.id;offset=0;notice('任务已创建，正在异步处理。');await refresh();}catch(error){notice(error.message,true);}finally{$('submit').disabled=!config?.execution_enabled;}};
+$('create').onsubmit=async(event)=>{event.preventDefault();if(!config?.execution_enabled)return;$('submit').disabled=true;try{const body={target:$('target').value,source_type:sourceType,authorization_confirmed:$('authorized').checked};if(sourceType==='zip'){const file=$('zip').files[0];if(!file||file.size>32*1024*1024)throw new Error('请选择不超过 32 MiB 的 ZIP 文件');body.zip_base64=await encodeFile(file);}else{body.repository=$('repository').value;body.branch=$('branch').value;}if($('login-enabled').checked){body.authentication={login_type:'form',login_url:$('login-url').value,credentials:{username:$('login-username').value,password:$('login-password').value,...($('login-totp').value?{totp_secret:$('login-totp').value}: {})},login_flow:$('login-flow').value.split('\n').map(s=>s.trim()).filter(Boolean),success_condition:{type:$('login-success-type').value,value:$('login-success').value}};}const task=await(await api('/tasks',body)).json();$('login-password').value='';$('login-totp').value='';selected=task.id;offset=0;notice('任务已创建，正在异步处理。');await refresh();}catch(error){notice(error.message,true);}finally{$('submit').disabled=!config?.execution_enabled;}};
 
 connect();

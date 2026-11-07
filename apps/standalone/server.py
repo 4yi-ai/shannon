@@ -16,6 +16,7 @@ from .auth import Access
 from .runner import Runner
 from .security import public_url
 from .store import Store
+from .target_auth import CredentialVault, validate_auth, redact
 
 MAX_BODY = 48 * 1024 * 1024
 STATIC = Path(__file__).with_name('web')
@@ -34,7 +35,7 @@ def make_handler(store, runner, access=None):
 
         def view_task(self, task):
             return dict(task, reports={kind: (runner.directory(task['id']) / 'reports' / filename).is_file()
-                                       for kind, (filename, _) in REPORTS.items()})
+                                       for kind, (filename, _) in REPORTS.items() if kind != 'pdf' or not task.get('authenticated_scan')})
 
         def log_message(self, fmt, *args):
             # Never log request paths, tokens, target query strings or response bodies.
@@ -105,7 +106,14 @@ def make_handler(store, runner, access=None):
                 task = store.get(task_id)
                 if report_type:
                     filename, mime = REPORTS[report_type]
-                    self.send(200, (runner.directory(task_id) / 'reports' / filename).read_bytes(), mime, filename)
+                    if task.get('authenticated_scan'):
+                        if report_type == 'pdf':
+                            raise ValueError('Authenticated scans currently provide redacted Markdown reports only')
+                        authentication = CredentialVault(store.root).load(runner.directory(task_id))
+                        report = redact((runner.directory(task_id) / 'reports' / filename).read_text(), authentication).encode()
+                    else:
+                        report = (runner.directory(task_id) / 'reports' / filename).read_bytes()
+                    self.send(200, report, mime, filename)
                 else:
                     self.send(200, self.view_task(task))
 
@@ -138,8 +146,10 @@ def make_handler(store, runner, access=None):
             if not isinstance(body, dict) or body.get('authorization_confirmed') is not True:
                 raise ValueError('Explicit authorization confirmation is required')
             target = public_url(body.get('target'), runner.origins)
+            authentication = validate_auth(body.get('authentication'), target, runner.origins)
             source_type = body.get('source_type')
-            task = {'target': target, 'source_type': source_type, 'authorization_confirmed': True}
+            task = {'target': target, 'source_type': source_type, 'authorization_confirmed': True,
+                    'authenticated_scan': authentication is not None}
             archive = None
             if source_type == 'zip':
                 archive = base64.b64decode(body.get('zip_base64', ''), validate=True)
@@ -164,17 +174,19 @@ def make_handler(store, runner, access=None):
                     self.send(507, {'error': 'Source archive quota exceeded; contact operator'})
                     return
                 task = store.create(task)
-                if archive is not None:
-                    try:
-                        directory = runner.directory(task['id'])
-                        directory.mkdir(parents=True)
+                try:
+                    directory = runner.directory(task['id'])
+                    directory.mkdir(parents=True, mode=0o700)
+                    if authentication is not None:
+                        CredentialVault(store.root).save(directory, authentication)
+                    if archive is not None:
                         with (directory / 'source.zip').open('xb') as output:
                             output.write(archive)
                             output.flush()
                             os.fsync(output.fileno())
-                    except OSError:
-                        store.update(task['id'], state='failed', error='Source persistence failed')
-                        raise
+                except (OSError, ValueError):
+                    store.update(task['id'], state='failed', error='Task inputs could not be persisted')
+                    raise ValueError('Task inputs could not be persisted') from None
                 self.send(202, task)
 
     return Handler

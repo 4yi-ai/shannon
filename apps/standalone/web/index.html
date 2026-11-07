@@ -16,6 +16,23 @@
         <div class="segments" role="group" aria-label="源代码方式"><button type="button" id="zip-tab" aria-pressed="true">上传 ZIP</button><button type="button" id="git-tab" aria-pressed="false">Git 仓库</button></div>
         <div id="zip-source" class="upload"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/></svg><input id="zip" type="file" accept=".zip,application/zip"><label class="file-picker" for="zip">选择 ZIP 文件</label><span id="filename">尚未选择文件</span><p>支持 .zip 格式，包含目标网站对应的源代码，最大 32 MiB。</p></div>
         <div id="git-source" hidden><label for="repository">Git 仓库地址</label><input id="repository" type="url" placeholder="https://github.com/组织/仓库.git"><label for="branch">分支</label><input id="branch" value="main" maxlength="200"><p class="hint">内部试用支持公开 HTTPS 仓库，私有代码请上传 ZIP。</p></div>
+        <fieldset class="target-login"><legend>被测网站登录</legend>
+          <label class="consent"><input id="login-enabled" type="checkbox"><span>测试需要登录的功能</span></label>
+          <div id="login-fields" hidden>
+            <p class="hint">使用已授权的专用测试账号。登录信息会交给当前实例的模型及浏览器执行；不要填写个人或生产管理员账号。支持同源表单登录及 TOTP，暂不支持跨域 SSO、短信或扫码。</p>
+            <label for="login-url">登录页面地址</label><input id="login-url" type="url" placeholder="https://example.com/login" maxlength="2048">
+            <label for="login-username">测试账号 / 邮箱</label><input id="login-username" autocomplete="off" maxlength="255">
+            <label for="login-password">测试密码</label><input id="login-password" type="password" autocomplete="new-password" maxlength="255">
+            <label for="login-totp">TOTP 密钥（可选）</label><input id="login-totp" type="password" autocomplete="new-password" maxlength="128" placeholder="Base32 密钥，不是一次性验证码">
+            <label for="login-flow">登录步骤（每行一步）</label><textarea id="login-flow" rows="4" maxlength="10000">在账号输入框填写 $username
+在密码输入框填写 $password
+点击登录按钮</textarea>
+            <p class="hint">使用 $username、$password 和 $totp 引用凭据；需要双因素认证时请增加填写 $totp 的步骤。</p>
+            <label for="login-success-type">登录成功判断</label><select id="login-success-type"><option value="url_contains">地址包含</option><option value="text_contains">页面包含文字</option><option value="url_equals_exactly">地址完全等于</option></select>
+            <label for="login-success">成功条件</label><input id="login-success" maxlength="500" placeholder="例如 /dashboard 或 退出登录">
+            <p class="hint">会先验证登录，失败则停止扫描。此类任务目前提供脱敏 Markdown 报告。</p>
+          </div>
+        </fieldset>
         <label class="consent"><input id="authorized" type="checkbox" required><span>我已获得测试授权，并确认目标属于允许范围。</span></label>
         <button class="primary" id="submit" disabled>创建任务</button>
       </form>

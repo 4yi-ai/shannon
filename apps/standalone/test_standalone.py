@@ -23,6 +23,7 @@ from .runner import Runner, outcome
 from .security import extract_zip, public_url
 from .server import make_handler
 from .store import Store
+from .target_auth import CredentialVault, validate_auth, redact
 
 
 SSO_ENV = {'SHANNON_AUTH_MODE':'4yi_sso', 'XCLAW_APP_HOSTNAME':'shannon.fixture.example',
@@ -39,6 +40,40 @@ SSO_HEADERS = {'X-Xclaw-Sso-Session-Id':'22222222-2222-4222-8222-222222222222',
 
 def resolver(address):
     return lambda *args, **kwargs: [(2, 1, 6, '', (address, 443))]
+
+
+LOGIN_FIXTURE = {'login_type':'form', 'login_url':'https://target.example/login',
+                 'credentials':{'username':'fixture@example.test','password':'fixture-unique-password',
+                                'totp_secret':'JBSWY3DPEHPK3PXP'},
+                 'login_flow':['Fill $username', 'Fill $password', 'Fill $totp', 'Click login'],
+                 'success_condition':{'type':'url_contains','value':'/dashboard'}}
+
+
+class TargetLoginTests(unittest.TestCase):
+    def test_scope_validation_and_secret_free_errors(self):
+        with patch('apps.standalone.target_auth.public_url', side_effect=lambda url, origins: url):
+            self.assertEqual(validate_auth(LOGIN_FIXTURE,'https://target.example',{'https://target.example'}),LOGIN_FIXTURE)
+            for change in [dict(login_url='https://other.example/login'),dict(login_url='https://target.example/login?token=secret'),
+                           dict(login_type='sso'),dict(credentials={'username':'u','password':''}),dict(login_flow=[]),
+                           dict(success_condition={'type':'url_equals_exactly','value':'https://other.example/dashboard'})]:
+                with self.subTest(change=list(change)), self.assertRaises(ValueError) as error:
+                    validate_auth(dict(LOGIN_FIXTURE,**change),'https://target.example',{'https://target.example'})
+                self.assertNotIn('fixture-unique-password',str(error.exception))
+
+    def test_encrypted_restart_tampering_and_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp)/'task';directory.mkdir()
+            vault=CredentialVault(tmp);vault.save(directory,LOGIN_FIXTURE)
+            encrypted=(directory/'authentication.enc').read_bytes()
+            for secret in LOGIN_FIXTURE['credentials'].values():
+                self.assertNotIn(secret.encode(),encrypted)
+            self.assertEqual(CredentialVault(tmp).load(directory),LOGIN_FIXTURE)
+            self.assertEqual(stat.S_IMODE((directory/'authentication.enc').stat().st_mode),0o600)
+            self.assertEqual(stat.S_IMODE((Path(tmp)/'.target-credentials-key').stat().st_mode),0o600)
+            corrupted=bytearray(encrypted);corrupted[-1]^=1
+            (directory/'authentication.enc').write_bytes(corrupted)
+            with self.assertRaises(ValueError):vault.load(directory)
+            self.assertEqual(redact({'error':'fixture-unique-password'},LOGIN_FIXTURE),{'error':'[REDACTED]'})
 
 
 class SecurityTests(unittest.TestCase):
@@ -179,6 +214,27 @@ class APITests(unittest.TestCase):
         reopened.db.close()
         self.assertEqual(len(self.request('/api/v1/tasks')[1]['tasks']), 1)
 
+    def test_target_login_is_private_and_report_download_is_redacted(self):
+        body={'target':'https://target.example','source_type':'git','repository':'https://github.com/example/repo.git',
+              'branch':'main','authorization_confirmed':True,'authentication':LOGIN_FIXTURE}
+        with patch('apps.standalone.server.public_url', side_effect=lambda url,*args: url), patch('apps.standalone.target_auth.public_url', side_effect=lambda url,*args: url):
+            status,task=self.request('/api/v1/tasks',body)
+        self.assertEqual(status,202)
+        self.assertTrue(task['authenticated_scan'])
+        directory=self.runner.directory(task['id'])
+        self.assertEqual(CredentialVault(self.store.root).load(directory),LOGIN_FIXTURE)
+        for path in ['/api/v1/tasks','/api/v1/tasks/'+task['id']]:
+            self.assertNotIn('fixture-unique-password',json.dumps(self.request(path)[1]))
+        self.assertNotIn('fixture-unique-password',self.store.db.execute('SELECT body FROM tasks').fetchone()[0])
+        reports=directory/'reports';reports.mkdir()
+        (reports/'Security-Assessment-Report.md').write_text('Evidence: fixture-unique-password JBSWY3DPEHPK3PXP')
+        (reports/'Security-Assessment-Report.pdf').write_bytes(b'unsafe-pdf')
+        request=urllib.request.Request(self.url+'/api/v1/tasks/'+task['id']+'/reports/markdown',headers=SSO_HEADERS)
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(response.read(),b'Evidence: [REDACTED] [REDACTED]')
+        self.assertEqual(self.request('/api/v1/tasks/'+task['id']+'/reports/pdf')[0],400)
+        self.assertNotIn('pdf',self.request('/api/v1/tasks/'+task['id'])[1]['reports'])
+
     def test_disabled_execution_and_invalid_input(self):
         self.runner.enabled = False
         self.assertEqual(self.request('/api/v1/tasks', {})[0], 503)
@@ -189,6 +245,38 @@ class APITests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_login_config_reaches_worker_and_is_removed_after_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=Store(tmp);runner=Runner(store,{'https://target.example'},True)
+            task=store.create({'target':'https://target.example','source_type':'zip','authenticated_scan':True})
+            directory=runner.directory(task['id']);directory.mkdir(parents=True)
+            CredentialVault(tmp).save(directory,LOGIN_FIXTURE)
+            def execute(command,cwd,env,log,timeout,scan=False):
+                self.assertTrue(scan)
+                config=Path(command[command.index('--config')+1])
+                self.assertEqual(json.loads(config.read_text())['authentication'],LOGIN_FIXTURE)
+                self.assertEqual(stat.S_IMODE(config.stat().st_mode),0o600)
+                (cwd/'progress.json').write_text(json.dumps({'currentPhase':'auth-validation'}))
+                raise ValueError('Rejected fixture-unique-password')
+            with patch.object(runner,'wait_for_temporal'),patch.object(runner,'terminate_workflow'),patch.object(runner,'execute',side_effect=execute),patch('apps.standalone.runner.public_url'),patch('apps.standalone.target_auth.public_url',side_effect=lambda url,*args:url),patch('apps.standalone.runner.extract_zip',return_value=directory),patch.dict(os.environ,{'LLM_MODEL':'fixture','OPENAI_API_BASE':'https://gateway.example/v1','OPENAI_API_KEY':'fixture'}):
+                runner.run(task)
+            self.assertEqual(store.get(task['id'])['state'],'failed')
+            self.assertNotIn('fixture-unique-password',store.get(task['id'])['error'])
+            self.assertFalse((directory/'login-config.json').exists())
+            self.assertTrue((directory/'authentication.enc').exists())
+            store.db.close()
+
+    def test_worker_console_redaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=Store(tmp);runner=Runner(store,set())
+            task=store.create({'target':'https://target.example'})
+            runner.current=task['id'];runner.authentication=LOGIN_FIXTURE
+            log=Path(tmp)/'worker.log'
+            command=[sys.executable,'-c',"print('fixture-unique-password JBSWY3DPEHPK3PXP')"]
+            self.assertEqual(runner.execute(command,Path(tmp),dict(os.environ),log,10),0)
+            self.assertEqual(log.read_text().strip(),'[REDACTED] [REDACTED]')
+            store.db.close()
+
     def test_cleanup_failure_never_pretends_task_stopped(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(tmp)

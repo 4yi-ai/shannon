@@ -10,6 +10,7 @@ from pathlib import Path
 from .security import extract_zip, public_url
 from .store import TERMINAL
 from .models import gateway_config
+from .target_auth import CredentialVault, redact
 
 PROJECT = Path(__file__).resolve().parents[2]
 
@@ -38,6 +39,7 @@ class Runner:
         self.stop = threading.Event()
         self.process = None
         self.current = None
+        self.authentication = None
 
     def directory(self, task_id):
         return self.store.root / 'tasks' / task_id
@@ -86,6 +88,14 @@ class Runner:
             with self.lock:
                 if self.store.get(task['id'])['state'] == 'cancelling':
                     state, error = 'cancelled', None
+                try:
+                    (self.directory(task['id']) / 'login-config.json').unlink(missing_ok=True)
+                    for session in self.directory(task['id']).rglob('auth-state.json'):
+                        session.unlink(missing_ok=True)
+                except OSError:
+                    self.store.update(task['id'], state='recovering', pending_terminal=state,
+                                      error='Waiting for private login artifact cleanup', **changes)
+                    return
                 self.store.update(task['id'], state=state, error=error, **changes)
 
     def loop(self):
@@ -106,6 +116,7 @@ class Runner:
 
     def run(self, task):
         task_id = task['id']
+        self.authentication = None
         directory = self.directory(task_id)
         with self.lock:
             if self.store.get(task_id)['state'] != 'queued':
@@ -113,6 +124,10 @@ class Runner:
             self.current = task_id
             self.store.update(task_id, state='preparing')
         try:
+            if task.get('authenticated_scan'):
+                self.authentication = CredentialVault(self.store.root).load(directory)
+                from .target_auth import validate_auth
+                validate_auth(self.authentication, task['target'], self.origins)
             self.wait_for_temporal(task_id)
             # Re-resolve at execution time as well as admission. This does not replace CNI policy.
             public_url(task['target'], self.origins)
@@ -152,22 +167,29 @@ class Runner:
                        SHANNON_RESULT_PATH=str(result_path),
                        SHANNON_PROGRESS_PATH=str(directory / 'progress.json'),
                        SHANNON_WORKSPACES_DIR=str(directory / 'workspaces'))
+            auth_args = []
+            if self.authentication:
+                config_path = directory / 'login-config.json'
+                fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, 'w') as config_file:
+                    json.dump({'authentication': self.authentication, 'report': {'guidance': 'Never include passwords, usernames, TOTP secrets, cookies or session tokens in reports. Use placeholders.'}}, config_file)
+                auth_args = ['--config', str(config_path)]
             code = self.execute(['node', str(PROJECT / 'apps/worker/dist/temporal/worker.js'), task['target'],
                                  str(repo), '--task-queue', 'scan-' + task_id, '--workspace', 'scan_' + task_id,
-                                 '--workflow-id', workflow_id, '--output', str(directory / 'reports')],
+                                 '--workflow-id', workflow_id, '--output', str(directory / 'reports')] + auth_args,
                                 directory, env, directory / 'worker.log', 14400, scan=True)
             latest = self.store.get(task_id)
             if latest['state'] == 'cancelling':
                 self.finish(latest, 'cancelled')
                 return
-            result = read_json(result_path)
+            result = redact(read_json(result_path), self.authentication)
             state = outcome(result, (directory / 'reports/Security-Assessment-Report.md').is_file(), code)
             self.finish(latest, state, result=result,
                         error='Scan did not produce a verified terminal result and report' if state == 'failed' else None)
         except Exception as error:
             latest = self.store.get(task_id)
             self.finish(latest, 'cancelled' if latest['state'] == 'cancelling' else 'failed',
-                        error=type(error).__name__ + ': ' + str(error)[:300])
+                        error=redact(type(error).__name__ + ': ' + str(error), self.authentication)[:300])
         finally:
             with self.lock:
                 self.current, self.process = None, None
@@ -177,14 +199,22 @@ class Runner:
             with self.lock:
                 if self.store.get(self.current)['state'] == 'cancelling':
                     raise ValueError('Cancelled before process start')
-                self.process = subprocess.Popen(command, cwd=cwd, env=env, stdout=output,
+                self.process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE if self.authentication else output,
                                                 stderr=subprocess.STDOUT, start_new_session=True)
                 process = self.process
+            def capture():
+                for line in iter(process.stdout.readline, b''):
+                    output.write(redact(line.decode('utf-8', errors='replace'), self.authentication).encode())
+                    output.flush()
+            reader = None
+            if self.authentication:
+                reader = threading.Thread(target=capture, daemon=True)
+                reader.start()
             deadline = time.monotonic() + timeout
             cancelling_since = None
             while process.poll() is None:
                 if scan:
-                    self.store.update(self.current, progress=read_json(cwd / 'progress.json'))
+                    self.store.update(self.current, progress=redact(read_json(cwd / 'progress.json'), self.authentication))
                 cancelling = self.stop.is_set() or self.store.get(self.current)['state'] == 'cancelling'
                 if cancelling or time.monotonic() > deadline:
                     if cancelling_since is None:
@@ -198,6 +228,9 @@ class Runner:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            if reader:
+                reader.join(timeout=5)
+                process.stdout.close()
             if not scan and process.returncode:
                 raise ValueError('Source checkout failed; see operator logs')
             return process.returncode

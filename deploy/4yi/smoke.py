@@ -19,8 +19,10 @@ parser.add_argument('--temporal-image', default='shannon-temporal:trial')
 parser.add_argument('--postgres-image', default='public.ecr.aws/docker/library/postgres:16.15-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139')
 args = parser.parse_args()
 project = 'shannon-test-' + secrets.token_hex(4)
-api_key = secrets.token_hex(32)
-environment = dict(os.environ, SHANNON_API_KEY=api_key, POSTGRES_PASSWORD=secrets.token_hex(32), OPENAI_API_KEY='', OPENAI_API_BASE='', LLM_MODEL='fixture-model')
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from apps.standalone.test_standalone import SSO_ENV, SSO_HEADERS
+environment = dict(os.environ, **SSO_ENV, POSTGRES_PASSWORD=secrets.token_hex(32), OPENAI_API_KEY='', OPENAI_API_BASE='', LLM_MODEL='fixture-model')
 root = Path(__file__).resolve().parents[2]
 
 with tempfile.TemporaryDirectory(prefix='shannon-smoke-') as tmp:
@@ -54,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='shannon-smoke-') as tmp:
             return 'http://127.0.0.1:'+ports[-1]['HostPort']
         base = web_address()
         def request(path, authenticated=True):
-            headers={'Authorization':'Bearer '+api_key} if authenticated else {}
+            headers=dict(SSO_HEADERS) if authenticated else {}
             with urllib.request.urlopen(urllib.request.Request(base+path,headers=headers),timeout=5) as response:
                 return response.read()
         ready(lambda:request('/shannon-healthz',False))
@@ -67,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='shannon-smoke-') as tmp:
         source = tarfile.open(fileobj=io.BytesIO(request('/source')))
         names = set(source.getnames())
         assert all(name in names for name in ['./LICENSE','./THIRD_PARTY_NOTICES.md','./pnpm-lock.yaml',
-                   './deploy/4yi/Dockerfile','./deploy/4yi/temporal/supervisor.py','./apps/standalone/server.py','./apps/cli/src/commands/start.ts'])
+                   './deploy/4yi/Dockerfile','./deploy/4yi/temporal/supervisor.py','./apps/standalone/server.py','./apps/standalone/auth.py','./apps/cli/src/commands/start.ts'])
         assert not any('/node_modules/' in name or name.endswith('/.env') for name in names)
         run(['exec','-T','web','sh','-c','test "$(id -u)" = 1001 && test ! -e /var/run/docker.sock'])
         browser = run(['exec','-T','-w','/app/data','web','playwright-cli','open','about:blank'],text=True,timeout=60)
@@ -137,7 +139,7 @@ print(task['id'])
         logs = subprocess.run(compose+['logs','--tail','60'],env=environment,capture_output=True,text=True)
         # Do not expose even accidentally logged credentials in a failed test.
         details = ''.join(value.decode(errors='replace') if isinstance(value, bytes) else value for value in (getattr(error, 'stdout', '') or '', getattr(error, 'stderr', '') or ''))
-        text = (logs.stdout+logs.stderr+details).replace(api_key,'[REDACTED]').replace(environment['POSTGRES_PASSWORD'],'[REDACTED]').replace(locals().get('wrong_password','__no_fixture_password__'),'[REDACTED]')
+        text = (logs.stdout+logs.stderr+details).replace(environment['POSTGRES_PASSWORD'],'[REDACTED]').replace(locals().get('wrong_password','__no_fixture_password__'),'[REDACTED]')
         print(text)
         raise
     finally:

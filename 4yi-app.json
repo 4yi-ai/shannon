@@ -1,10 +1,5 @@
 {
   "version": 1,
-  "auth": {
-    "bearerPassthroughPrefixes": [
-      "/api"
-    ]
-  },
   "services": [
     {
       "name": "web",
@@ -20,7 +15,8 @@
         "PORT": "8080",
         "DATA_DIR": "/app/data",
         "TEMPORAL_ADDRESS": "shannon-temporal:7233",
-        "SHANNON_EXECUTION_ENABLED": "false"
+        "SHANNON_EXECUTION_ENABLED": "false",
+        "SHANNON_AUTH_MODE": "4yi_sso"
       },
       "storage": {
         "sizeGb": 30,

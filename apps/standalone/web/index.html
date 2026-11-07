@@ -6,7 +6,7 @@
 <main>
   <h1>安全测试工作台</h1>
   <p class="intro">结合目标网站与源代码，验证授权范围内的安全风险。</p>
-  <form id="connect" class="connection"><label for="token">API 访问令牌</label><input id="token" type="password" autocomplete="off" required minlength="32" placeholder="输入实例 API 令牌"><button>连接</button><span id="connection-status" role="status">尚未连接</span></form>
+  <div class="connection"><strong>4YI 登录</strong><span id="connection-status" role="status">正在验证登录状态…</span><button id="reconnect" type="button">重新连接</button></div>
   <p id="notice" role="status" aria-live="polite"></p>
   <div class="workspace">
     <section class="panel create"><h2>创建扫描任务</h2>
@@ -21,7 +21,7 @@
       </form>
     </section>
     <section class="panel tasks"><div class="section-heading"><h2>扫描任务</h2><button type="button" class="quiet" id="refresh">刷新</button></div>
-      <div class="table-wrap"><table><thead><tr><th>目标网站</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="tasks"><tr><td colspan="3" class="empty">连接后查看扫描历史</td></tr></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>目标网站</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="tasks"><tr><td colspan="3" class="empty">正在加载扫描历史…</td></tr></tbody></table></div>
       <div class="pagination"><button type="button" class="quiet" id="previous" disabled>上一页</button><button type="button" class="quiet" id="next" disabled>下一页</button></div>
       <section class="detail"><h3>任务详情</h3><div id="detail"><p class="empty">选择任务，查看进度和报告。</p></div></section>
     </section>

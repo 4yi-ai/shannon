@@ -18,10 +18,23 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+from .auth import Access
 from .runner import Runner, outcome
 from .security import extract_zip, public_url
 from .server import make_handler
 from .store import Store
+
+
+SSO_ENV = {'SHANNON_AUTH_MODE':'4yi_sso', 'XCLAW_APP_HOSTNAME':'shannon.fixture.example',
+           'XCLAW_CONSUMER_ORG_ID':'11111111-1111-4111-8111-111111111111'}
+SSO_HEADERS = {'X-Xclaw-Sso-Session-Id':'22222222-2222-4222-8222-222222222222',
+               'X-Xclaw-User-Id':'33333333-3333-4333-8333-333333333333',
+               'X-Xclaw-Route-Id':'44444444-4444-4444-8444-444444444444',
+               'X-Xclaw-App-Id':'55555555-5555-4555-8555-555555555555',
+               'X-Xclaw-Owner-Org-Id':SSO_ENV['XCLAW_CONSUMER_ORG_ID'],
+               'X-Xclaw-Hostname':SSO_ENV['XCLAW_APP_HOSTNAME'],
+               'X-Forwarded-Host':SSO_ENV['XCLAW_APP_HOSTNAME'], 'X-Forwarded-Proto':'https',
+               'Origin':'https://'+SSO_ENV['XCLAW_APP_HOSTNAME']}
 
 
 def resolver(address):
@@ -106,7 +119,7 @@ class APITests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)
         self.runner = Runner(self.store, {'https://target.example'}, enabled=True)
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(self.store, self.runner, 'x' * 32))
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(self.store, self.runner, Access(SSO_ENV)))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = 'http://127.0.0.1:' + str(self.server.server_port)
@@ -118,8 +131,9 @@ class APITests(unittest.TestCase):
         self.store.db.close()
         self.temp.cleanup()
 
-    def request(self, path, body=None, authenticated=True):
-        headers = {'Authorization': 'Bearer ' + 'x' * 32} if authenticated else {}
+    def request(self, path, body=None, authenticated=True, extra_headers=None):
+        headers = dict(SSO_HEADERS) if authenticated else {}
+        headers.update(extra_headers or {})
         if body is not None:
             headers['Content-Type'] = 'application/json'
         req = urllib.request.Request(self.url + path, json.dumps(body).encode() if body is not None else None, headers)
@@ -128,6 +142,23 @@ class APITests(unittest.TestCase):
                 return response.status, json.load(response)
         except urllib.error.HTTPError as response:
             return response.code, json.load(response)
+
+    def test_sso_rejects_missing_identity_wrong_tenant_and_cross_origin(self):
+        self.assertEqual(self.request('/api/v1/tasks', authenticated=False,
+                         extra_headers={'Authorization':'Bearer '+'x'*64})[0],401)
+        self.assertEqual(self.request('/api/v1/tasks', authenticated=False,
+                         extra_headers={'X-Xclaw-Owner-Org-Id':SSO_ENV['XCLAW_CONSUMER_ORG_ID']})[0],401)
+        for overrides in [
+            {'X-Xclaw-Owner-Org-Id':'66666666-6666-4666-8666-666666666666'},
+            {'X-Xclaw-Hostname':'another.fixture.example'},
+            {'X-Forwarded-Proto':'http'},
+            {'X-Forwarded-Host':'another.fixture.example'},
+        ]:
+            self.assertEqual(self.request('/api/v1/tasks', extra_headers=overrides)[0],403)
+        for origin in ('https://attacker.example',''):
+            self.assertEqual(self.request('/api/v1/tasks', {}, extra_headers={'Origin':origin})[0],403)
+        self.assertEqual(self.store.list(),[])
+        self.assertEqual(self.request('/api/v1/config')[1]['auth_mode'],'4yi_sso')
 
     def test_auth_health_creation_cancel_persistence(self):
         self.assertEqual(self.request('/healthz', authenticated=False)[0], 200)
@@ -196,14 +227,14 @@ class RunnerTests(unittest.TestCase):
 
 
 class RestartTests(unittest.TestCase):
-    def test_invalid_token_keeps_http_up_but_blocks_all_api_and_execution(self):
-        for token in ('', 'x'*22):
-            with self.subTest(token_length=len(token)), tempfile.TemporaryDirectory() as tmp:
+    def test_missing_platform_context_keeps_http_up_but_blocks_all_api_and_execution(self):
+        for org in ('', 'invalid-org'):
+            with self.subTest(org=org), tempfile.TemporaryDirectory() as tmp:
                 with socket.socket() as probe:
                     probe.bind(('127.0.0.1', 0))
                     port = probe.getsockname()[1]
                 env = dict(os.environ, DATA_DIR=tmp, HOST='127.0.0.1', PORT=str(port),
-                           SHANNON_API_KEY=token, SHANNON_EXECUTION_ENABLED='true',
+                           XCLAW_APP_HOSTNAME=SSO_ENV['XCLAW_APP_HOSTNAME'], XCLAW_CONSUMER_ORG_ID=org, SHANNON_EXECUTION_ENABLED='true',
                            SHANNON_AUTHORIZED_ORIGINS='https://fixture.example', SHANNON_EGRESS_POLICY_VERIFIED='true')
                 process = subprocess.Popen([sys.executable,'-B','-m','apps.standalone.server'],env=env,
                                            stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -223,7 +254,7 @@ class RestartTests(unittest.TestCase):
                     with urllib.request.urlopen(base+'/') as response:
                         self.assertIn(b'<!doctype html>',response.read().lower())
                     for path, body in [('/api/v1/tasks',None),('/api/v1/tasks',b'{}'),('/api/v1/tasks/'+'a'*32+'/cancel',b'{}')]:
-                        request = urllib.request.Request(base+path, data=body, headers={'Authorization':'Bearer '+token})
+                        request = urllib.request.Request(base+path, data=body, headers={'Authorization':'Bearer old-key-is-not-web-auth'})
                         with self.assertRaises(urllib.error.HTTPError) as error:
                             urllib.request.urlopen(request)
                         self.assertEqual(error.exception.code,503)
@@ -248,7 +279,7 @@ class RestartTests(unittest.TestCase):
                 probe.bind(('127.0.0.1',0))
                 port = probe.getsockname()[1]
             env = dict(os.environ, DATA_DIR=tmp, HOST='127.0.0.1', PORT=str(port),
-                       SHANNON_API_KEY='fixture-restart-token-32-characters', SHANNON_EXECUTION_ENABLED='false')
+                       SHANNON_EXECUTION_ENABLED='false', **SSO_ENV)
             for iteration in range(2):
                 process = subprocess.Popen([sys.executable,'-B','-m','apps.standalone.server'],env=env,
                                            stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -263,7 +294,7 @@ class RestartTests(unittest.TestCase):
                     else:
                         self.fail('Standalone HTTP process did not start')
                     request = urllib.request.Request(f'http://127.0.0.1:{port}/api/v1/tasks/{task["id"]}',
-                              headers={'Authorization':'Bearer '+env['SHANNON_API_KEY']})
+                              headers=SSO_HEADERS)
                     with urllib.request.urlopen(request) as response:
                         result = json.load(response)
                     self.assertEqual(result['state'],'completed')

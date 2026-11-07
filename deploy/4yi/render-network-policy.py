@@ -8,12 +8,14 @@ import re
 parser = argparse.ArgumentParser()
 parser.add_argument('--namespace', required=True)
 parser.add_argument('--web-app-label', required=True)
+parser.add_argument('--router-namespace', required=True)
+parser.add_argument('--router-app-label', required=True)
 parser.add_argument('--temporal-app-label', required=True)
 parser.add_argument('--postgres-app-label', required=True)
 parser.add_argument('--allowed-https-ip', action='append', default=[], required=True,
                     help='An authorized target, approved Git host or gateway IP; repeat for every address')
 args = parser.parse_args()
-for label in [args.namespace, args.web_app_label, args.temporal_app_label, args.postgres_app_label]:
+for label in [args.namespace, args.web_app_label, args.temporal_app_label, args.postgres_app_label, args.router_namespace, args.router_app_label]:
     if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,62}', label):
         parser.error('Use verified Kubernetes namespace and workload label values')
 peers = []
@@ -46,6 +48,13 @@ items = [
            [dns, service(args.postgres_app_label, [5432]), service(args.temporal_app_label, [7233, 7234, 7235, 7239, 6933, 6934, 6935, 6939])]),
     policy('shannon-postgres-egress', args.postgres_app_label, [])
 ]
+# SSO headers are a trusted-proxy contract, not cryptographic assertions.
+# Only the verified platform router may enter the Web service.
+items[0]['spec']['policyTypes'].append('Ingress')
+items[0]['spec']['ingress'] = [{'from': [{
+    'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': args.router_namespace}},
+    'podSelector': {'matchLabels': {'app.kubernetes.io/name': args.router_app_label}}
+}], 'ports': [{'protocol': 'TCP', 'port': 8080}]}]
 for item, sources in [(items[1], [service(args.web_app_label, [7233]), service(args.temporal_app_label, [7233, 7234, 7235, 7239, 6933, 6934, 6935, 6939])]),
                       (items[2], [service(args.temporal_app_label, [5432])])]:
     item['spec']['policyTypes'].append('Ingress')

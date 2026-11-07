@@ -47,7 +47,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 ## Secret 与部署准备
 
-本地离线 Proposal 检查使用实际 xclaw 扫描/生成函数、虚构 source ref，并禁止数据库访问：结果为 `multi_service`、三服务、`blockers=[]`。`SHANNON_API_KEY` 被识别为安装方必填 Secret，`POSTGRES_PASSWORD` 被识别为平台托管随机凭据，网关 key 不列为安装方模型密钥。正式安装应优先使用平台生成的数据库密码并确保 Temporal 收到同一值；不要额外生成一个不同密码覆盖它。
+之前的离线 Proposal 检查验证了三服务拓扑。当前版本不再读取或要求 `SHANNON_API_KEY`；重新 Analyze 时应检查新 Proposal 不再要求该旧密钥。`POSTGRES_PASSWORD` 仍由平台托管，各服务须使用同一安装实例的值；网关凭据由平台注入。
 
 这不是远程 Analyze/Apply 或安装验收。现有警告包括内存、路由别名、流式连接、数据库及旧 CLI 的前端检测提示，需要在实际 Proposal 中核对。
 
@@ -55,7 +55,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 | 变量 | 作用 |
 | --- | --- |
-| `SHANNON_API_KEY` | 至少 32 字符随机独立 API token；网页与后续调用端使用同一实例 token |
+| `SHANNON_AUTH_MODE=4yi_sso` | 本版网页使用 4YI 会话，无需用户设置或填写应用 API Key |
 | `POSTGRES_PASSWORD` | 每安装随机数据库密码，Postgres 与 Temporal 使用相同值 |
 | `OPENAI_API_KEY` / `OPENAI_API_BASE` | 平台运行期注入的实例网关凭据/地址 |
 | `LLM_MODEL` | 平台安装模型选择 |
@@ -74,8 +74,8 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 6. 通过网络验收后才设置 `SHANNON_EGRESS_POLICY_VERIFIED=true`、`SHANNON_EXECUTION_ENABLED=true`。
 7. 用确认过的测试环境验收 ZIP/Git、进度、部分完成、失败、运行中取消、报告下载、服务重启、Pod 重建和两份持久卷。升级后确认历史和文件仍在。
 
-本地控制层无需 Docker，可在设置随机 `SHANNON_API_KEY` 后运行 `python3 -m apps.standalone.server`；默认不会执行扫描。
-本地三服务环境使用 `docker compose -f deploy/4yi/compose.yml up --build`，需在环境中设置 API token 与数据库密码。Compose 默认也禁止执行；它没有出口防火墙，不是安全扫描沙箱。
+本地控制层无需 Docker，可运行 `python3 -m apps.standalone.server` 查看网页；任务接口仍需受信平台代理及安装上下文，不能直接在浏览器伪造身份。自动化测试使用隔离的模拟平台身份。
+本地三服务环境使用 `docker compose -f deploy/4yi/compose.yml up --build`，需配置安装域名、组织 ID 和数据库密码，并经受信 SSO 代理访问。Compose 默认禁止执行；它没有出口防火墙，不是扫描沙箱。
 
 镜像升级前先备份数据库；若需要更新 Temporal schema，使用新 Temporal 镜像执行 `python3 /etc/temporal/standalone-server.py migrate`，成功后再替换常驻服务。正常启动不会隐式升级已有 schema，也会拒绝把新版本数据库交给旧镜像。Temporal 镜像从官方 1.29.1 二进制发布包及同标签源码提取 PostgreSQL schema，构建时校验 SHA-256；保留其 MIT 许可。仅内部网络开放无鉴权的 Temporal gRPC，不映射公网。默认 namespace 由 Web 内部启动检查幂等创建，保留期 7 天；HTTP 健康检查不承担初始化。
 
@@ -83,7 +83,11 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 ## API 契约（后续 PIAQEE 接入）
 
-除 `/shannon-healthz`、兼容路径 `/healthz`、静态页面与对应源码下载 `/source` 外，所有 API 都要求 `Authorization: Bearer <SHANNON_API_KEY>`，不信任客户端伪造的组织 Header。每个组织安装独立实例和独立 token；本阶段无共享多租户路由。
+本版取消网页手工 Key 流程。除健康检查、静态页面和对应源码外，任务接口要求受信 4YI 路由器验证后的 SSO 身份；旧 Bearer Key 不再被接受，声明移除 `/api` Bearer 透传。本阶段仍为每组织独立实例，PIAQEE 外部调用鉴权延期。
+
+平台向消费者安装注入 `XCLAW_APP_HOSTNAME`、`XCLAW_CONSUMER_ORG_ID`，应用校验代理注入的会话、用户、路由、应用 ID 以及安装组织、域名和 HTTPS 上下文。写操作要求同源 Origin。只收到组织头或缺少安装上下文时拒绝访问，不降级为匿名 API；未配置好安装上下文时不执行扫描。
+
+**信任边界：这些身份头不是签名。** 本地核对的 xclaw-router 会删除客户端全部 `x-xclaw-*` 头，验证平台会话后重新注入身份。应用 Service 必须保持私有，只允许受信路由器进入，不能直接公开 Pod/Service 或允许其他租户绕过代理直连。`render-network-policy.py` 新增必填的路由器 namespace 与工作负载标签参数，生成限制 Web 入站的策略；需由运维确认标签并验证 CNI。不能把浏览器可以随意提供的组织 Header 当作身份凭据。
 
 | 方法与路径 | 返回 |
 | --- | --- |
@@ -99,7 +103,14 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 状态：`queued → preparing → running → completed | partial | failed | cancelled`，取消期间为 `cancelling`，无法确认工作流清理时为 `recovering`。只有结构化结果为 completed/partial、退出码 0 且 Markdown 报告存在才认可完成；退出码 0 缺少结果或报告仍是失败。部分完成原因不丢弃。进度是完成/跳过的 Agent 数量，不等于精确耗时百分比。
 
-当前 API token 为实例级权限，可创建任务并读取该实例全部历史；无幂等键、用户级 ACL 或对外共享报告链接。后续接入 PIAQEE 时再定义客户端重试/幂等和轮换策略，不修改 Security Center 代码。
+当前平台登录用户可访问自己组织安装实例中的任务；本版尚无实例内部的用户级 ACL、幂等键或公开分享报告链接，不修改 Security Center 代码。
+
+### 后续 PIAQEE 接入待办（本版明确延期）
+
+- [ ] 设计独立的机器调用凭据或短期签名，定义租户绑定、权限范围、轮换及撤销；不能复用模型网关 key，也不能把凭据交给网页用户手填。
+- [ ] 再为机器调用开放受控路由与鉴权；当前移除了 Bearer 透传，不可直接用旧 Key 调用。
+- [ ] 定义创建任务的幂等键、重试、进度同步和报告读取权限，并补齐跨租户拒绝测试。
+- [ ] 单独确定 PIAQEE/Security Center 接入范围；本阶段仅完成 4YI 网页使用流程，不修改上述系统。
 
 ## 对应源码和许可
 
@@ -110,7 +121,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 ## 本轮验证与尚未完成项
 
 - 锁定依赖安装、上游 Worker TypeScript 构建、前端 JavaScript 语法检查通过。
-- 12 项 Python 测试通过，包括真实 HTTP 进程重启后的历史、代码、报告读取，以及第二监督器进程被锁拒绝。
+- 13 项 Python 测试通过，包括真实 HTTP 进程重启后的历史、代码、报告读取，以及第二监督器进程被锁拒绝。
 - 实际锁定 Pi runtime + 本地模型夹具验证：自定义模型注册、实例 Bearer token、`/chat/completions` SSE、工具调用及工具结果回传通过。没有调用真实模型或扫描真实目标。
 - 本机 Chrome/Playwright 验证：鉴权、任务列表/详情、Markdown 下载、Git 表单、创建、排队取消、桌面与 390px 手机布局通过；无 JavaScript 运行错误。测试任务和报告均为夹具数据。
 - xclaw 实际声明解析器、仓库扫描器、离线 Proposal 生成检查通过，没有修改 xclaw 文件或访问平台数据库。
@@ -121,7 +132,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 
 ## 发布失败排查：密钥、已有数据库与 Temporal 探针（2026-11-07 更新）
 
-空密钥或不足 32 字符时，新版 Web 继续启动网页和健康接口，日志只给出不含密钥的配置提示，所有受保护 API 返回 503，扫描强制关闭。仍需在安装实例的 Secret 配置中设置至少 32 字符的独立随机 token，推荐由 32 个随机字节生成；不能把“网页可访问”视为 API 已配置好。不要复用模型网关 key 或把 token 写入仓库。更新后滚动重启 Web，网页和 API 客户端也需要换用新 token。不要在日志、工单或聊天中发送 token。
+历史版本曾要求用户填写 32 字符的应用 Key。此问题已由本版 4YI 平台登录方式取代，不再要求设置或填写该 Key。缺少平台安装上下文时 Web 仍可启动，但受保护 API 返回 503 且禁止扫描；有效安装上下文下，缺少受信 SSO 身份的请求返回 401。
 
 若 PostgreSQL 持续报告 `password authentication failed for user "temporal"`，两个容器的环境变量相同不代表数据库角色密码相同：`POSTGRES_PASSWORD` 只在空数据目录初始化时设置角色密码，更新 Secret 不会修改已有角色。先确认挂载的是预期 PVC、数据库和角色，并备份已有数据库；不要删除、重新初始化或替换 PVC。
 

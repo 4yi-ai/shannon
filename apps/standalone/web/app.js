@@ -2,20 +2,34 @@ const $ = (id) => document.getElementById(id);
 const labels = {queued:'排队中',preparing:'准备中',running:'运行中',recovering:'清理中',cancelling:'取消中',completed:'完成',partial:'部分完成',failed:'失败',cancelled:'已取消'};
 const phases={preflight:'启动检查','auth-validation':'验证登录','pre-recon':'初步侦察',recon:'目标侦察',analysis:'漏洞分析',exploitation:'漏洞验证',report:'报告生成'};
 $('zip').onchange=()=>{$('filename').textContent=$('zip').files[0]?.name||'尚未选择文件';};
-let token = '', config = null, selected = null, sourceType = 'zip', offset = 0, timer = null;
+let config = null, selected = null, sourceType = 'zip', offset = 0, timer = null;
 function node(tag, text, className) { const element = document.createElement(tag); if(text !== undefined) element.textContent = text; if(className) element.className = className; return element; }
 function notice(text, error=false) { $('notice').textContent=text; $('notice').className=error?'error':''; }
 async function api(path, body) {
-  const response = await fetch('/api/v1'+path, {method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
+  const response = await fetch('/api/v1'+path, {method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
   if (!response.ok) { let message; try { message=(await response.json()).error; } catch { message='服务暂时不可用'; } throw new Error(message||'请求失败'); }
   return response;
 }
 function badge(state) { return node('span', labels[state]||state, 'badge '+state); }
 function switchSource(type) { sourceType=type; $('zip-source').hidden=type!=='zip'; $('git-source').hidden=type!=='git'; $('zip-tab').setAttribute('aria-pressed',String(type==='zip')); $('git-tab').setAttribute('aria-pressed',String(type==='git')); $('repository').required=type==='git'; }
 $('zip-tab').onclick=()=>switchSource('zip'); $('git-tab').onclick=()=>switchSource('git');
-$('connect').onsubmit=async(event)=>{ event.preventDefault(); token=$('token').value; clearTimeout(timer); try { config=await (await api('/config')).json(); $('token').value=''; $('connection-status').textContent='已连接（已认证）'; $('submit').disabled=!config.execution_enabled; notice(config.execution_enabled?'授权目标：'+config.authorized_origins.join('、')+' · 模型：'+config.model:'执行尚未开放：等待操作员验证网络隔离并配置授权目标。可查看历史记录。'); await refresh(); } catch(error) { token=''; config=null; $('submit').disabled=true; $('connection-status').textContent='连接失败'; notice(error.message,true); } };
+async function connect() {
+  clearTimeout(timer);
+  try {
+    config=await (await api('/config')).json();
+    $('connection-status').textContent='4YI 已登录';
+    $('submit').disabled=!config.execution_enabled;
+    notice(config.execution_enabled?'授权目标：'+config.authorized_origins.join('、')+' · 模型：'+config.model:'执行尚未开放：等待操作员验证网络隔离并配置授权目标。可查看历史记录。');
+    await refresh();
+  } catch(error) {
+    config=null; $('submit').disabled=true;
+    $('connection-status').textContent='登录验证未完成';
+    notice(error.message,true);
+  }
+}
+$('reconnect').onclick=connect;
 async function refresh() {
-  if(!token) return;
+  if(!config) return;
   try {
     const data=await (await api('/tasks?limit=20&offset='+offset)).json();
     $('tasks').replaceChildren();
@@ -47,3 +61,5 @@ function renderDetail(task) {
 }
 async function encodeFile(file){const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(binary);}
 $('create').onsubmit=async(event)=>{event.preventDefault();if(!config?.execution_enabled)return;$('submit').disabled=true;try{const body={target:$('target').value,source_type:sourceType,authorization_confirmed:$('authorized').checked};if(sourceType==='zip'){const file=$('zip').files[0];if(!file||file.size>32*1024*1024)throw new Error('请选择不超过 32 MiB 的 ZIP 文件');body.zip_base64=await encodeFile(file);}else{body.repository=$('repository').value;body.branch=$('branch').value;}const task=await(await api('/tasks',body)).json();selected=task.id;offset=0;notice('任务已创建，正在异步处理。');await refresh();}catch(error){notice(error.message,true);}finally{$('submit').disabled=!config?.execution_enabled;}};
+
+connect();

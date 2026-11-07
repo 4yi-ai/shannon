@@ -2,7 +2,6 @@
 import base64
 import binascii
 import fcntl
-import hmac
 import json
 import os
 import re
@@ -13,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .auth import Access
 from .runner import Runner
 from .security import public_url
 from .store import Store
@@ -23,7 +23,8 @@ REPORTS = {'markdown': ('Security-Assessment-Report.md', 'text/markdown; charset
            'pdf': ('Security-Assessment-Report.pdf', 'application/pdf')}
 
 
-def make_handler(store, runner, api_key):
+def make_handler(store, runner, access=None):
+    access = access or Access()
     class Handler(BaseHTTPRequestHandler):
         server_version = 'Shannon'
 
@@ -54,18 +55,10 @@ def make_handler(store, runner, api_key):
             self.end_headers()
             self.wfile.write(body)
 
-        def authorized(self):
-            if len(api_key) < 32:
-                return False
-            supplied = self.headers.get('Authorization', '')
-            return hmac.compare_digest(supplied.encode(), ('Bearer ' + api_key).encode())
-
         def require_auth(self):
-            if len(api_key) < 32:
-                self.send(503, {'error': 'API unavailable: configure SHANNON_API_KEY with at least 32 characters and restart the service'})
-                return False
-            if not self.authorized():
-                self.send(401, {'error': 'Bearer token required'})
+            status, error = access.check(self.headers, self.command)
+            if status != 200:
+                self.send(status, {'error': error})
                 return False
             return True
 
@@ -82,8 +75,8 @@ def make_handler(store, runner, api_key):
             path = parsed.path
             if path in ('/healthz', '/shannon-healthz'):
                 self.send(200, {'status': 'ok', 'service': 'shannon',
-                                'api_configured': len(api_key) >= 32,
-                                'execution_enabled': runner.enabled and len(api_key) >= 32})
+                                'api_configured': access.configured, 'auth_mode': access.mode,
+                                'execution_enabled': runner.enabled and access.configured})
                 return
             if path in ('/', '/app.js', '/style.css'):
                 name = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
@@ -97,7 +90,7 @@ def make_handler(store, runner, api_key):
             if not self.require_auth():
                 return
             if path == '/api/v1/config':
-                self.send(200, {'execution_enabled': runner.enabled, 'model': os.environ.get('LLM_MODEL'),
+                self.send(200, {'execution_enabled': runner.enabled, 'auth_mode': access.mode, 'model': os.environ.get('LLM_MODEL'),
                                 'authorized_origins': sorted(runner.origins), 'upstream': 'v3.5.0'})
             elif path == '/api/v1/tasks':
                 query = parse_qs(parsed.query)
@@ -189,10 +182,10 @@ def make_handler(store, runner, api_key):
 
 def main():
     os.umask(0o077)
-    api_key = os.environ.get('SHANNON_API_KEY', '')
-    api_configured = len(api_key) >= 32
+    access = Access()
+    api_configured = access.configured
     if not api_configured:
-        print('API disabled: SHANNON_API_KEY must contain at least 32 characters; Web remains available', file=sys.stderr, flush=True)
+        print('Application access not configured; Web remains available and scans are disabled', file=sys.stderr, flush=True)
     origins = {value.strip().rstrip('/') for value in os.environ.get('SHANNON_AUTHORIZED_ORIGINS', '').split(',') if value.strip()}
     enabled = os.environ.get('SHANNON_EXECUTION_ENABLED') == 'true'
     if enabled and (not origins or os.environ.get('SHANNON_EGRESS_POLICY_VERIFIED') != 'true'):
@@ -206,7 +199,7 @@ def main():
     except BlockingIOError:
         raise SystemExit('Another standalone supervisor already owns this data directory')
     runner = Runner(store, origins, enabled)
-    server = ThreadingHTTPServer((os.environ.get('HOST', '0.0.0.0'), int(os.environ.get('PORT', '8080'))), make_handler(store, runner, api_key))
+    server = ThreadingHTTPServer((os.environ.get('HOST', '0.0.0.0'), int(os.environ.get('PORT', '8080'))), make_handler(store, runner, access))
     server.daemon_threads = True
     server.timeout = 1
     def stop(signum, frame):

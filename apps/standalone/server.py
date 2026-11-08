@@ -78,7 +78,8 @@ def make_handler(store, runner, access=None):
             if path in ('/healthz', '/shannon-healthz'):
                 self.send(200, {'status': 'ok', 'service': 'shannon',
                                 'api_configured': access.configured, 'auth_mode': access.mode,
-                                'execution_enabled': runner.enabled and access.configured})
+                                'execution_enabled': runner.enabled and access.configured,
+                                'execution_mode': runner.execution_mode})
                 return
             if path in ('/', '/app.js', '/style.css'):
                 name = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
@@ -92,8 +93,9 @@ def make_handler(store, runner, access=None):
             if not self.require_auth():
                 return
             if path == '/api/v1/config':
-                self.send(200, {'execution_enabled': runner.enabled, 'auth_mode': access.mode, 'model': os.environ.get('LLM_MODEL'),
-                                'authorized_origins': sorted(runner.origins), 'upstream': 'v3.5.0'})
+                self.send(200, {'execution_enabled': runner.enabled, 'execution_mode': runner.execution_mode, 'auth_mode': access.mode, 'model': os.environ.get('LLM_MODEL'),
+                                'authorized_origins': sorted(runner.origins or ()),
+                                'target_policy': 'operator_allowlist' if runner.origins else 'public_https', 'upstream': 'v3.5.0'})
             elif path == '/api/v1/tasks':
                 query = parse_qs(parsed.query)
                 limit = max(1, min(100, int(query.get('limit', ['50'])[0])))
@@ -148,7 +150,7 @@ def make_handler(store, runner, access=None):
             if self.path != '/api/v1/tasks':
                 raise KeyError(self.path)
             if not runner.enabled:
-                self.send(503, {'error': 'Execution disabled: operator must verify network isolation and configure authorized origins'})
+                self.send(503, {'error': 'Execution is disabled for this installation'})
                 return
             body = self.read_body()
             if not isinstance(body, dict) or body.get('authorization_confirmed') is not True:
@@ -157,6 +159,7 @@ def make_handler(store, runner, access=None):
             authentication = validate_auth(body.get('authentication'), target, runner.origins)
             source_type = body.get('source_type')
             task = {'target': target, 'source_type': source_type, 'authorization_confirmed': True,
+                    'authorized_origin': 'https://' + urlsplit(target).netloc,
                     'authenticated_scan': authentication is not None,
                     'manual_email_code': bool(authentication and authentication.get('manual_email_code'))}
             archive = None
@@ -201,17 +204,24 @@ def make_handler(store, runner, access=None):
     return Handler
 
 
+def execution_settings(environ):
+    mode = environ.get('SHANNON_EXECUTION_MODE', 'isolated')
+    enabled = environ.get('SHANNON_EXECUTION_ENABLED') == 'true'
+    if mode not in ('trusted_dev', 'isolated'):
+        return mode, False
+    if mode == 'isolated' and environ.get('SHANNON_EGRESS_POLICY_VERIFIED') != 'true':
+        enabled = False
+    return mode, enabled
+
+
 def main():
     os.umask(0o077)
     access = Access()
     api_configured = access.configured
     if not api_configured:
         print('Application access not configured; Web remains available and scans are disabled', file=sys.stderr, flush=True)
-    origins = {value.strip().rstrip('/') for value in os.environ.get('SHANNON_AUTHORIZED_ORIGINS', '').split(',') if value.strip()}
-    enabled = os.environ.get('SHANNON_EXECUTION_ENABLED') == 'true'
-    if enabled and (not origins or os.environ.get('SHANNON_EGRESS_POLICY_VERIFIED') != 'true'):
-        print('Execution disabled: configure authorized origins and verify external egress isolation', file=sys.stderr, flush=True)
-        enabled = False
+    origins = {value.strip().rstrip('/') for value in os.environ.get('SHANNON_AUTHORIZED_ORIGINS', '').split(',') if value.strip()} or None
+    mode, enabled = execution_settings(os.environ)
     enabled = enabled and api_configured
     store = Store(os.environ.get('DATA_DIR', './standalone-data'))
     supervisor_lock = (store.root / '.supervisor.lock').open('a')
@@ -219,7 +229,7 @@ def main():
         fcntl.flock(supervisor_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise SystemExit('Another standalone supervisor already owns this data directory')
-    runner = Runner(store, origins, enabled)
+    runner = Runner(store, origins, enabled, execution_mode=mode)
     server = ThreadingHTTPServer((os.environ.get('HOST', '0.0.0.0'), int(os.environ.get('PORT', '8080'))), make_handler(store, runner, access))
     server.daemon_threads = True
     server.timeout = 1

@@ -14,7 +14,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
       SHANNON_AUTHORIZED_ORIGINS: ${SHANNON_AUTHORIZED_ORIGINS:-}
-      SHANNON_EXECUTION_ENABLED: "false"
+      SHANNON_EXECUTION_ENABLED: ${SHANNON_EXECUTION_ENABLED:-true}
+      SHANNON_EXECUTION_MODE: ${SHANNON_EXECUTION_MODE:-trusted_dev}
+      SHANNON_EGRESS_POLICY_VERIFIED: ${SHANNON_EGRESS_POLICY_VERIFIED:-false}
     volumes: ["app-data:/app/data"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]

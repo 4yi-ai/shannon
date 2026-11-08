@@ -31,6 +31,7 @@ RUN npm install -g --ignore-scripts @playwright/cli@0.1.1 \
     && mkdir -p /tmp/.claude/skills \
     && cp -r /usr/local/lib/node_modules/@playwright/cli/node_modules/playwright/lib/skill /tmp/.claude/skills/playwright-cli
 COPY --from=builder /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml /app/.npmrc /app/
+COPY --from=builder /app/4yi-app.json /app/4yi-app.json
 COPY --from=builder /app/node_modules /app/node_modules
 COPY --from=builder /app/apps/worker /app/apps/worker
 COPY --from=builder /app/apps/cli/package.json /app/apps/cli/package.json

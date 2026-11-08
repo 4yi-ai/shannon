@@ -34,8 +34,9 @@ def outcome(result, report_exists, exit_code):
 
 
 class Runner:
-    def __init__(self, store, origins, enabled=False):
+    def __init__(self, store, origins, enabled=False, execution_mode='isolated'):
         self.store, self.origins, self.enabled = store, origins, enabled
+        self.execution_mode = execution_mode
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.process = None

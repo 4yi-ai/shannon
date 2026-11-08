@@ -22,7 +22,7 @@ async function connect() {
     config=await (await api('/config')).json();
     $('connection-status').textContent='4YI 已登录';
     $('submit').disabled=!config.execution_enabled;
-    notice(config.execution_enabled?'授权目标：'+config.authorized_origins.join('、')+' · 模型：'+config.model:'执行尚未开放：等待操作员验证网络隔离并配置授权目标。可查看历史记录。');
+    notice(config.execution_enabled?(config.execution_mode==='trusted_dev'?'开发内测 · ':'')+(config.target_policy==='public_https'?'目标范围：页面填写并确认授权的公网 HTTPS 网站':'授权目标：'+config.authorized_origins.join('、'))+' · 模型：'+config.model:'扫描执行未启用。请检查本实例的执行模式和开关；仍可查看历史记录。');
     await refresh();
   } catch(error) {
     config=null; $('submit').disabled=true;

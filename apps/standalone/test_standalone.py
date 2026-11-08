@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from http.server import ThreadingHTTPServer
@@ -22,7 +23,7 @@ from .auth import Access
 from . import manual_otp
 from .runner import Runner, outcome
 from .security import extract_zip, public_url
-from .server import make_handler
+from .server import make_handler, execution_settings
 from .store import Store
 from .target_auth import CredentialVault, validate_auth, redact
 
@@ -301,6 +302,28 @@ class APITests(unittest.TestCase):
         self.assertNotIn('246810',json.dumps(self.request('/api/v1/tasks')[1]))
         self.assertNotIn('135790',json.dumps(self.request('/api/v1/tasks')[1]))
 
+    def test_page_targets_need_no_operator_allowlist_but_private_targets_are_rejected(self):
+        self.runner.origins=None;self.runner.execution_mode='trusted_dev'
+        config=self.request('/api/v1/config')[1]
+        self.assertTrue(config['execution_enabled'])
+        self.assertEqual(config['target_policy'],'public_https')
+        self.assertEqual(config['authorized_origins'],[])
+        archive=io.BytesIO()
+        with zipfile.ZipFile(archive,'w') as z:z.writestr('app.py','# fixture')
+        body={'source_type':'zip','authorization_confirmed':True,'zip_base64':base64.b64encode(archive.getvalue()).decode()}
+        def validate(value, origins=None):
+            host=urllib.parse.urlsplit(value).hostname
+            address=host if host in ('10.0.0.1','169.254.169.254','127.0.0.1') else '8.8.8.8'
+            return public_url(value,origins,resolver(address))
+        with patch('apps.standalone.server.public_url',side_effect=validate):
+            for target in ('https://first.fixture.example','https://second.fixture.example'):
+                status,task=self.request('/api/v1/tasks',dict(body,target=target))
+                self.assertEqual(status,202)
+                self.assertEqual(task['authorized_origin'],target)
+            for target in ('https://10.0.0.1','https://169.254.169.254','https://127.0.0.1','https://localhost','https://api.svc','http://public.example'):
+                self.assertEqual(self.request('/api/v1/tasks',dict(body,target=target))[0],400)
+        self.assertEqual(len(self.store.list()),2)
+
     def test_disabled_execution_and_invalid_input(self):
         self.runner.enabled = False
         self.assertEqual(self.request('/api/v1/tasks', {})[0], 503)
@@ -404,6 +427,56 @@ class RunnerTests(unittest.TestCase):
 
 
 class RestartTests(unittest.TestCase):
+    def test_execution_modes_respect_explicit_shutdown_and_isolated_gate(self):
+        self.assertEqual(execution_settings({}),('isolated',False))
+        for env,expected in [
+            ({'SHANNON_EXECUTION_MODE':'trusted_dev','SHANNON_EXECUTION_ENABLED':'true'},True),
+            ({'SHANNON_EXECUTION_MODE':'trusted_dev','SHANNON_EXECUTION_ENABLED':'false'},False),
+            ({'SHANNON_EXECUTION_MODE':'isolated','SHANNON_EXECUTION_ENABLED':'true'},False),
+            ({'SHANNON_EXECUTION_MODE':'isolated','SHANNON_EXECUTION_ENABLED':'true','SHANNON_EGRESS_POLICY_VERIFIED':'true'},True),
+            ({'SHANNON_EXECUTION_MODE':'typo','SHANNON_EXECUTION_ENABLED':'true','SHANNON_EGRESS_POLICY_VERIFIED':'true'},False),
+        ]:
+            self.assertEqual(execution_settings(env)[1],expected)
+
+    def test_marketplace_declaration_starts_enabled_without_manual_policy_flags(self):
+        project=Path(__file__).resolve().parents[2]
+        declaration=json.loads((project/'4yi-app.json').read_text())
+        declared=next(s for s in declaration['services'] if s['name']=='web')['env']
+        self.assertEqual(declared['SHANNON_EXECUTION_MODE'],'trusted_dev')
+        self.assertEqual(declared['SHANNON_EXECUTION_ENABLED'],'true')
+        with tempfile.TemporaryDirectory() as tmp:
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
+            env={**os.environ,**declared,**SSO_ENV}
+            env.update(DATA_DIR=tmp,HOST='127.0.0.1',PORT=str(port))
+            for key in ('SHANNON_AUTHORIZED_ORIGINS','SHANNON_EGRESS_POLICY_VERIFIED'):env.pop(key,None)
+            # Replace the scan loop only inside this fixture: admit tasks without executing targets/models.
+            script='from apps.standalone.runner import Runner; Runner.loop=lambda self:self.stop.wait(); from apps.standalone.server import main; main()'
+            process=subprocess.Popen([sys.executable,'-B','-c',script],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            base=f'http://127.0.0.1:{port}'
+            try:
+                for _ in range(100):
+                    try:
+                        with urllib.request.urlopen(base+'/shannon-healthz',timeout=.5) as response:health=json.load(response)
+                        break
+                    except OSError:time.sleep(.05)
+                else:self.fail('Web did not start')
+                self.assertTrue(health['execution_enabled'])
+                self.assertEqual(health['execution_mode'],'trusted_dev')
+                request=urllib.request.Request(base+'/api/v1/config',headers=SSO_HEADERS)
+                with urllib.request.urlopen(request) as response:config=json.load(response)
+                self.assertTrue(config['execution_enabled']);self.assertEqual(config['target_policy'],'public_https')
+                archive=io.BytesIO()
+                with zipfile.ZipFile(archive,'w') as z:z.writestr('fixture.py','# not executed')
+                body={'target':'https://8.8.8.8','source_type':'zip','authorization_confirmed':True,'zip_base64':base64.b64encode(archive.getvalue()).decode()}
+                request=urllib.request.Request(base+'/api/v1/tasks',json.dumps(body).encode(),dict(SSO_HEADERS,**{'Content-Type':'application/json'}))
+                with urllib.request.urlopen(request) as response:
+                    self.assertEqual(response.status,202);self.assertEqual(json.load(response)['state'],'queued')
+                with self.assertRaises(urllib.error.HTTPError) as error:urllib.request.urlopen(base+'/api/v1/tasks')
+                self.assertEqual(error.exception.code,401)
+            finally:
+                process.terminate();process.communicate(timeout=10)
+
     def test_missing_platform_context_keeps_http_up_but_blocks_all_api_and_execution(self):
         for org in ('', 'invalid-org'):
             with self.subTest(org=org), tempfile.TemporaryDirectory() as tmp:

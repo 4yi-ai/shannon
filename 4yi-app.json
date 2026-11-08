@@ -15,7 +15,8 @@
         "PORT": "8080",
         "DATA_DIR": "/app/data",
         "TEMPORAL_ADDRESS": "shannon-temporal:7233",
-        "SHANNON_EXECUTION_ENABLED": "false",
+        "SHANNON_EXECUTION_ENABLED": "true",
+        "SHANNON_EXECUTION_MODE": "trusted_dev",
         "SHANNON_AUTH_MODE": "4yi_sso"
       },
       "storage": {

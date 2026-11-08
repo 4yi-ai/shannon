@@ -1,6 +1,6 @@
 > [!NOTE]
 > **4YI 独立应用适配（内部试用准备）**：网页、持久化任务 API、无 Docker socket 执行与 SQL-backed Temporal 的说明见 [独立应用部署指南](docs/4yi-standalone.md)。固定上游 v3.5.0；扫描默认关闭，必须先验证授权范围与外部网络隔离。本阶段未接入 Security Center。
-> 当前网页使用 4YI 平台登录，不再要求手填应用 API Key；PIAQEE 独立接口鉴权已记录为后续待办。
+> 当前网页使用 4YI 平台登录，无需手填应用 API Key。4YI 声明默认启用受信任开发内测：安装后从页面提交已授权的公网 HTTPS 目标与源码即可创建扫描，无需逐个设置白名单；这不提供 Agent 网络强隔离。严格模式及边界见 [部署说明](docs/4yi-standalone.md)。PIAQEE 独立接口鉴权仍为后续待办。
 
 > [!NOTE]
 > **[php2shell upgrade verification](docs/exp-php2shell.md):** confirm your PHP apps are patched against the php2shell RCE chain with the experimental `--exp-php2shell` probe. See the [test results](docs/exp-php2shell-testing.md).

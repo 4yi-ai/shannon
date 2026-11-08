@@ -29,6 +29,7 @@ with tempfile.TemporaryDirectory(prefix='shannon-smoke-') as tmp:
     override = Path(tmp) / 'override.json'
     config = json.loads(subprocess.check_output(['docker','compose','-p',project,'-f',str(root/'deploy/4yi/compose.yml'),'config','--format','json'],env=environment))
     config['services']['web'].update(image=args.web_image, ports=[{'target':8080,'published':'0','host_ip':'127.0.0.1','protocol':'tcp'}])
+    config['services']['web']['environment']['SHANNON_EXECUTION_ENABLED'] = 'false'  # Fixtures never scan.
     config['services']['temporal']['image'] = args.temporal_image
     config['services']['postgres']['image'] = args.postgres_image
     for service in config['services'].values():

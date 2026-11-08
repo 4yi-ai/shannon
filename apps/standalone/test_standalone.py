@@ -254,7 +254,7 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.request(endpoint,body),(202,{'accepted':True}))
         self.assertEqual(redact('246810',self.runner.authentication),'[REDACTED]')
         self.assertNotIn(b'246810',(directory/'otp-response.enc').read_bytes())
-        self.assertEqual(vault.redaction_auth(directory)['credentials']['manual_code'],'246810')
+        self.assertEqual(vault.redaction_auth(directory)['credentials']['manual_code_1'],'246810')
         self.assertEqual(self.request(endpoint,body)[0],400)
         for route in ['/api/v1/tasks','/api/v1/tasks/'+task['id']]:
             self.assertNotIn('246810',json.dumps(self.request(route)[1]))
@@ -268,6 +268,38 @@ class APITests(unittest.TestCase):
         self.runner.finish(self.store.get(task['id']),'cancelled')
         self.assertFalse((directory/'otp-request.json').exists())
         self.assertIsNone(self.request('/api/v1/tasks/'+task['id'])[1]['email_challenge'])
+
+    def test_manual_email_resend_cooldown_and_all_codes_stay_redacted(self):
+        task=self.store.create({'target':'https://target.example','authenticated_scan':True,'manual_email_code':True})
+        directory=self.runner.directory(task['id']);directory.mkdir(parents=True)
+        vault=CredentialVault(self.store.root);vault.save(directory,LOGIN_FIXTURE)
+        self.store.update(task['id'],state='waiting_for_code')
+        code_url='/api/v1/tasks/'+task['id']+'/email-code';resend_url='/api/v1/tasks/'+task['id']+'/email-resend'
+        def request(attempt,expired=False,cooldown=False):
+            value={'id':str(attempt)*32,'expires_at':time.time()+(-1 if expired else 300),'deadline_at':time.time()+480,
+                   'resend_after':time.time()+(60 if cooldown else -1),'attempt':attempt,'reason':'initial' if attempt==1 else 'incorrect'}
+            (directory/'otp-request.json').write_text(json.dumps(value))
+            return value['id']
+        first=request(1,cooldown=True)
+        self.assertEqual(self.request(resend_url,{'request_id':first})[0],400)
+        self.assertEqual(self.request(resend_url,{'request_id':first},authenticated=False)[0],401)
+        self.assertEqual(self.request(code_url,{'request_id':first,'code':'246810'})[0],202)
+        manual_otp.cleanup(directory)
+        second=request(2,expired=True)
+        self.assertEqual(self.request(code_url,{'request_id':second,'code':'135790'})[0],400)
+        self.assertEqual(self.request(resend_url,{'request_id':first})[0],400)
+        self.assertEqual(self.request(resend_url,{'request_id':second})[0],202)
+        self.assertEqual(self.request(resend_url,{'request_id':second})[0],400)
+        payload=json.loads(vault.transform('open',(directory/'otp-response.enc').read_bytes()))
+        self.assertEqual(payload,{'request_id':second,'action':'resend'})
+        manual_otp.cleanup(directory)
+        third=request(3)
+        self.assertEqual(self.request(resend_url,{'request_id':third})[0],400)
+        self.assertEqual(self.request(code_url,{'request_id':third,'code':'135790'})[0],202)
+        masked=redact('246810 and 135790',vault.redaction_auth(directory))
+        self.assertEqual(masked,'[REDACTED] and [REDACTED]')
+        self.assertNotIn('246810',json.dumps(self.request('/api/v1/tasks')[1]))
+        self.assertNotIn('135790',json.dumps(self.request('/api/v1/tasks')[1]))
 
     def test_disabled_execution_and_invalid_input(self):
         self.runner.enabled = False
@@ -310,6 +342,18 @@ class RunnerTests(unittest.TestCase):
             self.assertNotEqual(code,0)
             self.assertIsNotNone(runner.process.poll())
             store.db.close()
+
+    def test_email_deadline_covers_round_gaps_but_not_authenticated_scans(self):
+        for status in ('received','resend_requested','authenticated'):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                store=Store(tmp);runner=Runner(store,set())
+                task=store.create({'target':'https://target.example'})
+                store.update(task['id'],state='running');runner.current=task['id']
+                (Path(tmp)/'otp-session.json').write_text(json.dumps({'deadline':time.time()*1000-1}))
+                (Path(tmp)/'otp-status.json').write_text(json.dumps({'status':status}))
+                code=runner.execute([sys.executable,'-c','import time;time.sleep(.5)'],Path(tmp),dict(os.environ),Path(tmp)/'worker.log',10,scan=True)
+                self.assertEqual(code==0,status=='authenticated')
+                store.db.close()
 
     def test_worker_console_redaction(self):
         with tempfile.TemporaryDirectory() as tmp:

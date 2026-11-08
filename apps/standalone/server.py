@@ -137,9 +137,9 @@ def make_handler(store, runner, access=None):
             return json.loads(self.rfile.read(length))
 
         def post(self):
-            otp = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/email-code', self.path)
+            otp = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/(email-code|email-resend)', self.path)
             if otp:
-                self.send(202, manual_otp.submit(runner, otp[1], self.read_body(2048)))
+                self.send(202, manual_otp.submit(runner, otp[1], self.read_body(2048), resend=otp[2] == 'email-resend'))
                 return
             match = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/cancel', self.path)
             if match:

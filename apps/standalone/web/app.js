@@ -53,13 +53,31 @@ function renderDetail(task) {
   const focused=document.activeElement?.id==='email-code';const selection=focused?document.activeElement.selectionStart:null;
   const root=$('detail');root.replaceChildren();
   const challenge=task.email_challenge;
-  if(challenge && challenge.expires_at*1000>Date.now()){
+  if(challenge && (challenge.deadline_at||challenge.expires_at)*1000>Date.now()){
     if(emailDraft.id!==challenge.id)emailDraft={id:challenge.id,value:''};
     const form=node('form',undefined,'email-verification');
-    form.append(node('h4','等待邮箱验证码'),node('p',challenge.submitted?'验证码已提交，正在继续验证登录。':'请到测试账号邮箱查看本次验证码。截止时间：'+new Date(challenge.expires_at*1000).toLocaleTimeString('zh-CN')));
-    if(!challenge.submitted){const label=node('label','邮箱验证码');label.htmlFor='email-code';const input=node('input');input.id='email-code';input.type='password';input.autocomplete='one-time-code';input.inputMode='numeric';input.minLength=4;input.maxLength=12;input.pattern='[A-Za-z0-9]{4,12}';input.required=true;input.value=emailDraft.value;input.oninput=()=>{emailDraft={id:challenge.id,value:input.value};};const button=node('button','提交验证码并继续');button.type='submit';form.append(label,input,button);form.onsubmit=async(event)=>{event.preventDefault();button.disabled=true;try{await (await api('/tasks/'+task.id+'/email-code',{request_id:challenge.id,code:input.value.trim()})).json();input.value='';emailDraft={id:null,value:''};notice('验证码已提交，正在继续登录验证。');await refresh();}catch(error){notice(error.message,true);button.disabled=false;}};}else{emailDraft={id:null,value:''};}
+    const expired=challenge.expires_at*1000<=Date.now();
+    const attempt=challenge.attempt||1, maximum=challenge.max_attempts||3;
+    const hints={initial:'请到测试账号邮箱查看本次验证码。',incorrect:'网站未接受上次验证码，请重新输入。',after_resend:'请查看重新发送的邮件，并填写最新验证码。'};
+    form.append(node('h4','等待邮箱验证码 · 第 '+attempt+' / '+maximum+' 轮'),node('p',challenge.submitted?'验证码或重发请求已提交，正在处理。':hints[challenge.reason]||hints.initial));
+    form.append(node('p','当前验证码输入截止：'+new Date(challenge.expires_at*1000).toLocaleTimeString('zh-CN')+' · 登录等待截止：'+new Date((challenge.deadline_at||challenge.expires_at)*1000).toLocaleTimeString('zh-CN')));
+    if(!challenge.submitted){
+      if(!expired){
+        const label=node('label','邮箱验证码');label.htmlFor='email-code';
+        const input=node('input');input.id='email-code';input.type='password';input.autocomplete='one-time-code';input.inputMode='numeric';input.minLength=4;input.maxLength=12;input.pattern='[A-Za-z0-9]{4,12}';input.required=true;input.value=emailDraft.value;
+        input.oninput=()=>{emailDraft={id:challenge.id,value:input.value};};
+        const button=node('button','提交验证码并继续');button.type='submit';form.append(label,input,button);
+        form.onsubmit=async(event)=>{event.preventDefault();button.disabled=true;try{await (await api('/tasks/'+task.id+'/email-code',{request_id:challenge.id,code:input.value.trim()})).json();input.value='';emailDraft={id:null,value:''};notice('验证码已提交，正在继续登录验证。');await refresh();}catch(error){notice(error.message,true);button.disabled=false;}};
+      }else{form.append(node('p',attempt<maximum?'本轮输入已超时，可以请求重新发送验证码。':'最后一轮输入已超时，任务将停止。'));emailDraft={id:null,value:''};}
+      if(attempt<maximum){
+        const seconds=Math.max(0,Math.ceil(((challenge.resend_after||challenge.expires_at)*1000-Date.now())/1000));
+        const resend=node('button',seconds?'重新发送（'+seconds+' 秒后）':'请求重新发送验证码');resend.type='button';resend.disabled=seconds>0;
+        resend.onclick=async()=>{resend.disabled=true;try{await (await api('/tasks/'+task.id+'/email-resend',{request_id:challenge.id})).json();emailDraft={id:null,value:''};notice('已请求在当前登录会话中重新发送邮件，等待网站确认。');await refresh();}catch(error){notice(error.message,true);resend.disabled=false;}};
+        form.append(resend);
+      }else{form.append(node('p','已到最后一轮，请确认验证码后提交。'));}
+    }else{emailDraft={id:null,value:''};}
     root.append(form);
-    if(focused && !challenge.submitted){const input=form.querySelector('input');input.focus({preventScroll:true});if(selection!==null)input.setSelectionRange(selection,selection);}
+    if(focused && !challenge.submitted && !expired){const input=form.querySelector('input');input.focus({preventScroll:true});if(selection!==null)input.setSelectionRange(selection,selection);}
   }else{emailDraft={id:null,value:''};} const dl=node('dl');
   const add=(title,value)=>{dl.append(node('dt',title),node('dd',value));};
   add('目标网站',task.target); add('登录测试',task.authenticated_scan?'已配置专用测试账号':'未配置'); const state=node('dd');state.append(badge(task.state));dl.append(node('dt','任务状态'),state);

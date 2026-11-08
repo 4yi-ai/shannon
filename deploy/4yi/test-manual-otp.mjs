@@ -5,7 +5,7 @@ import { mkdtemp, readFile, writeFile, access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { waitForEmailCode } from '../../apps/worker/dist/services/manual-email-code.js';
+import { waitForEmailCode, EmailResendRequested } from '../../apps/worker/dist/services/manual-email-code.js';
 
 async function fixture(test) {
   const directory = await mkdtemp(path.join(tmpdir(),'shannon-otp-'));
@@ -57,4 +57,29 @@ for(const tampered of [false,true])await fixture(async(directory,keyPath,key)=>{
   await writeFile(path.join(directory,'otp-response.enc'),blob);await rejected;
   await assert.rejects(access(path.join(directory,'otp-response.enc')));
 });
-console.log('PASS: manual email code IPC, encrypted response, one use, timeout, cancellation, replay and tamper rejection');
+await fixture(async(directory,keyPath,key)=>{
+  let deadline;
+  for(let attempt=1;attempt<=3;attempt++){
+    const waiting=waitForEmailCode(directory,keyPath,undefined,3000,attempt===1?'initial':'incorrect',5000);
+    const request=await pending(directory);
+    assert.equal(request.attempt,attempt);
+    if(deadline)assert.equal(request.deadline_at,deadline);else deadline=request.deadline_at;
+    if(attempt===1)await assert.rejects(waitForEmailCode(directory,keyPath,undefined,10));
+    await writeFile(path.join(directory,'otp-response.enc'),seal(key,{request_id:request.id,code:'246810'}));
+    assert.equal(await waiting,'246810');
+  }
+  await assert.rejects(waitForEmailCode(directory,keyPath,undefined,3000,'incorrect',5000),/limit/);
+});
+await fixture(async(directory,keyPath,key)=>{
+  const waiting=waitForEmailCode(directory,keyPath,undefined,3000,'initial',5000);
+  const rejected=assert.rejects(waiting,EmailResendRequested);
+  const request=await pending(directory);
+  await writeFile(path.join(directory,'otp-response.enc'),seal(key,{request_id:request.id,action:'resend'}));
+  await rejected;
+  const second=waitForEmailCode(directory,keyPath,undefined,3000,'after_resend',5000);
+  const next=await pending(directory);assert.equal(next.attempt,2);assert.notEqual(next.id,request.id);
+  assert.equal(next.deadline_at,request.deadline_at);
+  await writeFile(path.join(directory,'otp-response.enc'),seal(key,{request_id:next.id,code:'135790'}));
+  assert.equal(await second,'135790');
+});
+console.log('PASS: encrypted code delivery; bounded correction rounds; operator resend; shared deadline; concurrent/replay/tamper rejection; timeout/cancel');

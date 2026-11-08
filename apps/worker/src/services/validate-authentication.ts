@@ -12,7 +12,7 @@
  * pipeline burns hours on broken auth.
  */
 
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
@@ -149,7 +149,7 @@ export async function validateAuthentication(
   const otpKeyPath = process.env.SHANNON_MANUAL_OTP_KEY_PATH;
   const emailTools = otpDirectory && otpKeyPath ? [manualEmailCodeTool(otpDirectory, otpKeyPath)] : undefined;
   if (emailTools) {
-    prompt += '\nMANUAL EMAIL VERIFICATION: After submitting the username/password once and the site sends an email, wait until its code field appears, then call request_email_code exactly once. It pauses for the human operator to enter the code in Shannon. Fill the returned code in that field, submit once and verify the configured success condition. Do not ask for mailbox access, invent a code, retry login, or write the code in reports. On timeout or rejection, submit login_success=false with failure_point=out_of_band. This is a required step in this login flow; preserve the current browser session while waiting.';
+    prompt += '\nMANUAL EMAIL VERIFICATION: Submit username/password once only. Once the site has sent email and displays its code field, call request_email_code(reason=initial). Keep this browser session open. Fill and submit the returned code once, then verify success. Exception to the single-submission rule: if the WEBSITE explicitly rejects only the email code and keeps the code form, call request_email_code(reason=incorrect) to let the operator correct it, up to three rounds/eight minutes total. Never repeat username/password or retry a rejected password. Never resend email autonomously: only an explicit operator resendRequested tool response authorizes clicking the site resend control once; after site confirms sending, call reason=after_resend. If no control exists, site blocks requests, session expires, or the tool fails, stop with login_success=false, failure_point=out_of_band. Never print codes or put them in reports.';
   }
 
   await auditSession.startAgent(AGENT_NAME, attemptNumber);
@@ -185,6 +185,10 @@ export async function validateAuthentication(
     if (!sessionCheck.ok) {
       classification = sessionCheck;
     }
+  }
+
+  if (classification.ok && emailTools && otpDirectory) {
+    await writeFile(path.join(otpDirectory, 'otp-status.json'), JSON.stringify({status: 'authenticated'}), {mode: 0o600});
   }
 
   const durationMs = Date.now() - startTime;

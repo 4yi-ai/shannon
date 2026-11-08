@@ -191,7 +191,7 @@ class Runner:
             state = outcome(result, (directory / 'reports/Security-Assessment-Report.md').is_file(), code)
             error = 'Scan did not produce a verified terminal result and report' if state == 'failed' else None
             if state == 'failed' and read_json(directory / 'otp-status.json').get('status') == 'expired':
-                error = 'Email verification timed out after 5 minutes; create a new task to retry'
+                error = 'Email verification time limit reached; create a new task to retry'
             self.finish(latest, state, result=result, error=error)
         except Exception as error:
             latest = self.store.get(task_id)
@@ -226,10 +226,15 @@ class Runner:
                         waiting = manual_otp.challenge(cwd)
                         changes = {'progress': redact(read_json(cwd / 'progress.json'), self.authentication)}
                         if latest['state'] in ('running', 'waiting_for_code'):
-                            changes['state'] = 'waiting_for_code' if waiting and waiting['expires_at'] > time.time() else 'running'
+                            changes['state'] = 'waiting_for_code' if waiting and waiting['deadline_at'] > time.time() else 'running'
                         self.store.update(self.current, **changes)
                 cancelling = self.stop.is_set() or self.store.get(self.current)['state'] == 'cancelling'
-                otp_failed = scan and read_json(cwd / 'otp-status.json').get('status') in ('expired', 'failed')
+                otp_status = read_json(cwd / 'otp-status.json').get('status')
+                otp_deadline = read_json(cwd / 'otp-session.json').get('deadline')
+                if scan and isinstance(otp_deadline, (int, float)) and time.time() * 1000 >= otp_deadline and otp_status != 'authenticated':
+                    (cwd / 'otp-status.json').write_text(json.dumps({'status': 'expired'}))
+                    otp_status = 'expired'
+                otp_failed = scan and otp_status in ('expired', 'failed')
                 if cancelling or otp_failed or time.monotonic() > deadline:
                     if cancelling_since is None:
                         cancelling_since = time.monotonic()

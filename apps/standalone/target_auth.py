@@ -105,7 +105,9 @@ class CredentialVault:
         file = directory / 'otp-redaction.enc'
         if file.exists():
             extra = json.loads(self.transform('open', file.read_bytes()))
-            authentication['credentials']['manual_code'] = extra['code']
+            codes = extra.get('codes', [extra['code']] if 'code' in extra else [])
+            for index, code in enumerate(codes, 1):
+                authentication['credentials']['manual_code_' + str(index)] = code
         return authentication
 
 

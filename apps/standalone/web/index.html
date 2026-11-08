@@ -24,7 +24,7 @@
             <label for="login-username">测试账号 / 邮箱</label><input id="login-username" autocomplete="off" maxlength="255">
             <label for="login-password">测试密码</label><input id="login-password" type="password" autocomplete="new-password" maxlength="255">
             <label class="consent"><input id="login-email-code" type="checkbox"><span>登录需要邮箱验证码（人工输入）</span></label>
-            <p class="hint">收到验证码后，在右侧任务详情中输入。每次任务等待最多 5 分钟，不需要提供邮箱密码。</p>
+            <p class="hint">收到验证码后，在右侧任务详情中输入。验证码错误可在当前任务重输，过期可请求重发。最多 3 轮、总计 8 分钟，不需要提供邮箱密码。</p>
             <label for="login-totp">TOTP 密钥（可选）</label><input id="login-totp" type="password" autocomplete="new-password" maxlength="128" placeholder="Base32 密钥，不是一次性验证码">
             <label for="login-flow">登录步骤（每行一步）</label><textarea id="login-flow" rows="4" maxlength="10000">在账号输入框填写 $username
 在密码输入框填写 $password

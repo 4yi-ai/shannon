@@ -2,6 +2,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import threading
 import time
@@ -194,12 +195,22 @@ class Runner:
                                SHANNON_MANUAL_OTP_KEY_PATH=str(self.store.root / '.target-credentials-key'))
             code = self.execute(['node', str(PROJECT / 'apps/worker/dist/temporal/worker.js'), task['target'],
                                  str(repo), '--task-queue', 'scan-' + task_id, '--workspace', 'scan_' + task_id,
-                                 '--workflow-id', workflow_id, '--output', str(directory / 'reports')] + auth_args,
+                                 '--workflow-id', workflow_id] + auth_args,
                                 directory, env, directory / 'worker.log', 14400, scan=True)
             latest = self.store.get(task_id)
             if latest['state'] == 'cancelling':
                 self.finish(latest, 'cancelled')
                 return
+            # Upstream accepts only /app/output for mounted customer output. Use
+            # its native per-workspace route, then publish final artifacts into
+            # this task's persistent report directory without a shared symlink.
+            workspace = directory / 'workspaces' / ('scan_' + task_id)
+            for name in ('Security-Assessment-Report.md', 'Security-Assessment-Report.pdf'):
+                source = workspace / name
+                if source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(directory.resolve()):
+                    reports = directory / 'reports'
+                    reports.mkdir(exist_ok=True, mode=0o700)
+                    shutil.copyfile(source, reports / name)
             result = redact(read_json(result_path), self.authentication)
             state = outcome(result, (directory / 'reports/Security-Assessment-Report.md').is_file(), code)
             error = 'Scan did not produce a verified terminal result and report' if state == 'failed' else None

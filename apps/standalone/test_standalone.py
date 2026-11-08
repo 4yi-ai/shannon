@@ -563,13 +563,18 @@ class RunnerTests(unittest.TestCase):
                 def execute(command, cwd, env, log, timeout, scan=False):
                     if status != 'missing':
                         (cwd / 'result.json').write_text(json.dumps({'status':status,'partialReasons':[] }))
-                    (cwd / 'reports').mkdir()
-                    (cwd / 'reports/Security-Assessment-Report.md').write_text('# Fixture')
+                    self.assertNotIn('--output', command)
+                    workspace_name = command[command.index('--workspace') + 1]
+                    workspace = Path(env['SHANNON_WORKSPACES_DIR']) / workspace_name
+                    workspace.mkdir()
+                    (workspace / 'Security-Assessment-Report.md').write_text('# Fixture')
+                    (workspace / 'Security-Assessment-Report.pdf').write_bytes(b'%PDF-fixture')
                     return 0
                 with patch.object(runner, 'wait_for_temporal'), patch.object(runner, 'terminate_workflow'), patch.object(runner, 'execute', side_effect=execute), patch('apps.standalone.runner.public_url'), patch('apps.standalone.runner.extract_zip', return_value=Path(tmp)), patch.dict(os.environ, {'LLM_MODEL':'fixture-model','OPENAI_API_BASE':'https://gateway.example/api/v1','OPENAI_API_KEY':'fixture-token'}):
                     runner.run(task)
                 self.assertEqual(store.get(task['id'])['state'], 'failed' if status == 'missing' else status)
-                self.assertTrue((runner.directory(task['id']) / 'reports/Security-Assessment-Report.md').is_file())
+                self.assertEqual((runner.directory(task['id']) / 'reports/Security-Assessment-Report.md').read_text(), '# Fixture')
+                self.assertEqual((runner.directory(task['id']) / 'reports/Security-Assessment-Report.pdf').read_bytes(), b'%PDF-fixture')
                 store.db.close()
 
 

@@ -1,6 +1,8 @@
 """Admission controls. Runtime network isolation must also be enforced externally."""
 import ipaddress
 import socket
+import struct
+from contextlib import nullcontext
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -32,12 +34,36 @@ def public_url(value, allowed_origins=None, resolver=socket.getaddrinfo):
     return origin + (parsed.path or '/') + (('?' + parsed.query) if parsed.query else '')
 
 
-def extract_zip(archive, destination, max_bytes=256 * 1024 * 1024, max_files=20000):
+def validate_zip_directory(archive, max_files=50000):
+    # Bound metadata before ZipFile materializes the entire central directory.
+    context = nullcontext(archive) if hasattr(archive, 'read') else open(archive, 'rb')
+    with context as stream:
+        original = stream.tell()
+        try:
+            stream.seek(0, 2);size = stream.tell()
+            start = max(0, size - 65557)
+            stream.seek(start);tail = stream.read(65557)
+            index = tail.rfind(b'PK\x05\x06')
+            if index < 0 or len(tail) - index < 22:
+                raise ValueError('Invalid ZIP directory')
+            _, disk, directory_disk, disk_count, count, directory_bytes, offset, comment = struct.unpack_from('<4s4H2LH', tail, index)
+            if disk or directory_disk or disk_count != count or count > max_files or count == 65535:
+                raise ValueError('ZIP has too many files or uses unsupported split/ZIP64 format')
+            if tail[max(0,index-20):index-16] == b'PK\x06\x07' or directory_bytes == 0xffffffff or offset == 0xffffffff:
+                raise ValueError('ZIP64 source archives are not supported')
+            if directory_bytes > 32 * 1024 * 1024 or offset + directory_bytes > start + index or index + 22 + comment != len(tail):
+                raise ValueError('ZIP directory exceeds safe source limits')
+        finally:
+            stream.seek(original)
+
+
+def extract_zip(archive, destination, max_bytes=1024 * 1024 * 1024, max_files=50000):
     destination = Path(destination)
+    validate_zip_directory(archive, max_files)
     with zipfile.ZipFile(archive) as source:
         entries = source.infolist()
         if not entries or len(entries) > max_files:
-            raise ValueError('ZIP must contain between 1 and 20000 entries')
+            raise ValueError('ZIP must contain between 1 and 50000 entries')
         total = 0
         names = set()
         for item in entries:

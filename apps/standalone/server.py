@@ -17,6 +17,7 @@ from . import manual_otp
 from .runner import Runner
 from .security import public_url
 from .store import Store
+from .uploads import Uploads, UploadError, MAX_ZIP_BYTES, LEGACY_ZIP_BYTES
 from .target_auth import CredentialVault, validate_auth, redact
 
 MAX_BODY = 48 * 1024 * 1024
@@ -27,6 +28,7 @@ REPORTS = {'markdown': ('Security-Assessment-Report.md', 'text/markdown; charset
 
 def make_handler(store, runner, access=None):
     access = access or Access()
+    uploads = Uploads(store.root)
     class Handler(BaseHTTPRequestHandler):
         server_version = 'Shannon'
 
@@ -95,6 +97,7 @@ def make_handler(store, runner, access=None):
             if path == '/api/v1/config':
                 self.send(200, {'execution_enabled': runner.enabled, 'execution_mode': runner.execution_mode, 'auth_mode': access.mode, 'model': os.environ.get('LLM_MODEL'),
                                 'authorized_origins': sorted(runner.origins or ()),
+                                'max_zip_bytes': MAX_ZIP_BYTES,
                                 'target_policy': 'operator_allowlist' if runner.origins else 'public_https', 'upstream': 'v3.5.0'})
             elif path == '/api/v1/tasks':
                 query = parse_qs(parsed.query)
@@ -125,6 +128,9 @@ def make_handler(store, runner, access=None):
                 return
             try:
                 self.post()
+            except UploadError as error:
+                self.close_connection = True
+                self.send(error.status, {'error': str(error)})
             except (ValueError, binascii.Error, TypeError, OSError) as error:
                 self.send(400, {'error': str(error)[:300]})
             except KeyError:
@@ -139,6 +145,15 @@ def make_handler(store, runner, access=None):
             return json.loads(self.rfile.read(length))
 
         def post(self):
+            if self.path == '/api/v1/uploads':
+                if not runner.enabled:
+                    self.send(503, {'error': 'Execution is disabled for this installation'})
+                    return
+                if self.headers.get('Content-Type', '').split(';')[0] != 'application/zip' or self.headers.get('Transfer-Encoding'):
+                    raise UploadError('Send ZIP bytes with Content-Type application/zip and Content-Length')
+                length = int(self.headers.get('Content-Length', '0'))
+                self.send(201, uploads.receive(self.rfile, length, self.headers['X-Xclaw-User-Id']))
+                return
             otp = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/(email-code|email-resend)', self.path)
             if otp:
                 self.send(202, manual_otp.submit(runner, otp[1], self.read_body(2048), resend=otp[2] == 'email-resend'))
@@ -163,11 +178,18 @@ def make_handler(store, runner, access=None):
                     'authenticated_scan': authentication is not None,
                     'manual_email_code': bool(authentication and authentication.get('manual_email_code'))}
             archive = None
+            upload_id = None
             if source_type == 'zip':
-                archive = base64.b64decode(body.get('zip_base64', ''), validate=True)
-                if not archive or len(archive) > 32 * 1024 * 1024:
-                    raise ValueError('ZIP must be between 1 byte and 32 MiB')
-                # Structural safety is checked in the worker before extraction.
+                upload_id = body.get('upload_id')
+                if upload_id is not None:
+                    if 'zip_base64' in body:
+                        raise UploadError('Use either upload_id or legacy zip_base64')
+                    with uploads.lock:
+                        uploads.resolve(upload_id, self.headers['X-Xclaw-User-Id'])
+                else:
+                    archive = base64.b64decode(body.get('zip_base64', ''), validate=True)
+                    if not archive or len(archive) > LEGACY_ZIP_BYTES:
+                        raise UploadError('Legacy Base64 ZIP limit is 32 MiB; use binary uploads for files up to 256 MiB', 413)
             elif source_type == 'git':
                 repository = public_url(body.get('repository'))
                 if urlsplit(repository).query:
@@ -178,19 +200,19 @@ def make_handler(store, runner, access=None):
                 task.update(repository=repository, branch=branch)
             else:
                 raise ValueError('source_type must be zip or git')
-            with runner.lock:
+            with runner.lock, uploads.lock:
                 if len(store.active()) >= 10:
                     self.send(429, {'error': 'Task queue full'})
                     return
-                if sum(p.stat().st_size for p in store.root.rglob('source.zip')) + len(archive or b'') > 1024 ** 3:
-                    self.send(507, {'error': 'Source archive quota exceeded; contact operator'})
-                    return
+                uploads.check_quota(len(archive or b''))
                 task = store.create(task)
                 try:
                     directory = runner.directory(task['id'])
                     directory.mkdir(parents=True, mode=0o700)
                     if authentication is not None:
                         CredentialVault(store.root).save(directory, authentication)
+                    if upload_id is not None:
+                        uploads.consume(upload_id, self.headers['X-Xclaw-User-Id'], directory / 'source.zip')
                     if archive is not None:
                         with (directory / 'source.zip').open('xb') as output:
                             output.write(archive)

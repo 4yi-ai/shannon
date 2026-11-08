@@ -25,6 +25,7 @@ from .runner import Runner, outcome
 from .security import extract_zip, public_url
 from .server import make_handler, execution_settings
 from .store import Store
+from .uploads import Uploads, UploadError, MAX_ZIP_BYTES
 from .target_auth import CredentialVault, validate_auth, redact
 
 
@@ -149,6 +150,69 @@ class SecurityTests(unittest.TestCase):
                 ({'status': 'completed'}, True, 0, 'completed'), ({'status': 'completed'}, False, 0, 'failed'),
                 ({'status': 'completed'}, True, 1, 'failed'), ({'status': 'cancelled'}, False, 0, 'cancelled')]:
             self.assertEqual(outcome(result, report, code), expected)
+
+
+class UploadTests(unittest.TestCase):
+    def archive(self):
+        output=io.BytesIO()
+        with zipfile.ZipFile(output,'w') as z:z.writestr('app.py','# fixture')
+        return output.getvalue()
+
+    def test_streaming_owner_restart_one_use_and_incomplete_cleanup(self):
+        class BoundedStream(io.BytesIO):
+            def read(self,size=-1):
+                if size<0 or size>1024*1024:raise AssertionError('Upload read is not bounded')
+                return super().read(size)
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads=Uploads(tmp);data=self.archive()
+            result=uploads.receive(BoundedStream(data),len(data),'owner-a')
+            token=result['upload_id']
+            self.assertEqual(Uploads(tmp).resolve(token,'owner-a').read_bytes(),data)
+            with self.assertRaises(UploadError):uploads.resolve(token,'owner-b')
+            destination=Path(tmp)/'tasks'/'fixture'/'source.zip';destination.parent.mkdir(parents=True)
+            uploads.consume(token,'owner-a',destination)
+            self.assertEqual(destination.read_bytes(),data)
+            with self.assertRaises(UploadError):uploads.resolve(token,'owner-a')
+            with self.assertRaises(UploadError):uploads.receive(BoundedStream(b'bad'),len(data),'owner-a')
+            with self.assertRaises(UploadError):uploads.receive(BoundedStream(b'bad'),3,'owner-a')
+            self.assertEqual(list(uploads.directory.iterdir()),[])
+
+    def test_zip_larger_than_old_limit_is_received_in_bounded_chunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'large.zip'
+            with zipfile.ZipFile(source,'w',compression=zipfile.ZIP_STORED) as archive:
+                with archive.open('fixture.bin','w') as member:
+                    for _ in range(33):member.write(b'0'*(1024*1024))
+            class Reader:
+                def __init__(self,file):self.file=file;self.maximum=0
+                def read(self,size):
+                    self.maximum=max(self.maximum,size)
+                    if not 0<size<=1024*1024:raise AssertionError('Unbounded upload read')
+                    return self.file.read(size)
+            uploads=Uploads(tmp)
+            with source.open('rb') as stream:
+                reader=Reader(stream);result=uploads.receive(reader,source.stat().st_size,'owner')
+            self.assertGreater(result['size_bytes'],32*1024*1024)
+            self.assertLessEqual(reader.maximum,1024*1024)
+            self.assertEqual(uploads.resolve(result['upload_id'],'owner').stat().st_size,source.stat().st_size)
+
+    def test_size_quota_concurrency_and_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads=Uploads(tmp);data=self.archive()
+            for size in (0,MAX_ZIP_BYTES+1):
+                with self.assertRaises(UploadError) as error:uploads.receive(io.BytesIO(),size,'owner')
+                self.assertEqual(error.exception.status,413)
+            with patch('apps.standalone.uploads.ARCHIVE_QUOTA',len(data)-1):
+                with self.assertRaises(UploadError) as error:uploads.receive(io.BytesIO(data),len(data),'owner')
+                self.assertEqual(error.exception.status,507)
+            uploads.slots.acquire();uploads.slots.acquire()
+            with self.assertRaises(UploadError) as error:uploads.receive(io.BytesIO(data),len(data),'owner')
+            self.assertEqual(error.exception.status,429)
+            uploads.slots.release();uploads.slots.release()
+            result=uploads.receive(io.BytesIO(data),len(data),'owner');file=uploads.resolve(result['upload_id'],'owner')
+            for item in uploads.directory.iterdir():os.utime(item,(time.time()-7300,time.time()-7300))
+            uploads.check_quota()
+            self.assertFalse(file.exists())
 
 
 class APITests(unittest.TestCase):
@@ -323,6 +387,30 @@ class APITests(unittest.TestCase):
             for target in ('https://10.0.0.1','https://169.254.169.254','https://127.0.0.1','https://localhost','https://api.svc','http://public.example'):
                 self.assertEqual(self.request('/api/v1/tasks',dict(body,target=target))[0],400)
         self.assertEqual(len(self.store.list()),2)
+
+    def test_binary_upload_then_create_and_reject_oversize_or_wrong_owner(self):
+        archive=io.BytesIO()
+        with zipfile.ZipFile(archive,'w') as z:z.writestr('app.py','# fixture')
+        data=archive.getvalue()
+        def upload(headers):
+            request=urllib.request.Request(self.url+'/api/v1/uploads',data,dict(headers,**{'Content-Type':'application/zip'}))
+            try:
+                with urllib.request.urlopen(request) as response:return response.status,json.load(response)
+            except urllib.error.HTTPError as response:return response.code,json.load(response)
+        self.assertEqual(upload({})[0],401)
+        status,result=upload(SSO_HEADERS);self.assertEqual(status,201)
+        self.assertEqual(self.request('/api/v1/config')[1]['max_zip_bytes'],256*1024*1024)
+        body={'target':'https://target.example','source_type':'zip','authorization_confirmed':True,'upload_id':result['upload_id']}
+        with patch('apps.standalone.server.public_url',return_value='https://target.example/'):
+            other={'X-Xclaw-User-Id':'99999999-9999-4999-8999-999999999999'}
+            self.assertEqual(self.request('/api/v1/tasks',body,extra_headers=other)[0],400)
+            status,task=self.request('/api/v1/tasks',body)
+            self.assertEqual(status,202)
+            self.assertEqual((self.runner.directory(task['id'])/'source.zip').read_bytes(),data)
+            self.assertEqual(self.request('/api/v1/tasks',body)[0],400)
+        oversized=urllib.request.Request(self.url+'/api/v1/uploads',b'',dict(SSO_HEADERS,**{'Content-Type':'application/zip','Content-Length':str(MAX_ZIP_BYTES+1)}))
+        with self.assertRaises(urllib.error.HTTPError) as error:urllib.request.urlopen(oversized)
+        self.assertEqual(error.exception.code,413)
 
     def test_disabled_execution_and_invalid_input(self):
         self.runner.enabled = False

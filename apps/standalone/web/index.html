@@ -14,7 +14,7 @@
         <label for="target">目标网站</label><input id="target" type="url" placeholder="https://example.com" required>
         <label class="source-label">源代码</label>
         <div class="segments" role="group" aria-label="源代码方式"><button type="button" id="zip-tab" aria-pressed="true">上传 ZIP</button><button type="button" id="git-tab" aria-pressed="false">Git 仓库</button></div>
-        <div id="zip-source" class="upload"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/></svg><input id="zip" type="file" accept=".zip,application/zip"><label class="file-picker" for="zip">选择 ZIP 文件</label><span id="filename">尚未选择文件</span><p>支持 .zip 格式，包含目标网站对应的源代码，最大 32 MiB。</p></div>
+        <div id="zip-source" class="upload"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/></svg><input id="zip" type="file" accept=".zip,application/zip"><label class="file-picker" for="zip">选择 ZIP 文件</label><span id="filename">尚未选择文件</span><p>支持 .zip 格式，包含目标网站对应的源代码，最大 256 MiB。</p></div>
         <div id="git-source" hidden><label for="repository">Git 仓库地址</label><input id="repository" type="url" placeholder="https://github.com/组织/仓库.git"><label for="branch">分支</label><input id="branch" value="main" maxlength="200"><p class="hint">内部试用支持公开 HTTPS 仓库，私有代码请上传 ZIP。</p></div>
         <fieldset class="target-login"><legend>被测网站登录</legend>
           <label class="consent"><input id="login-enabled" type="checkbox"><span>测试需要登录的功能</span></label>

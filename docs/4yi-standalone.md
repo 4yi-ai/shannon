@@ -97,7 +97,7 @@ Web 的 `/app/data` 包含 `tasks.sqlite3`（WAL、FULL 同步）、`tasks/<id>/
 | `GET /api/v1/tasks/{id}/reports/markdown` | Markdown 附件 |
 | `GET /api/v1/tasks/{id}/reports/pdf` | 可用时返回 PDF，否则 404 |
 
-创建任务的 JSON 必须包含 `target`、`authorization_confirmed: true`，以及 `source_type: "zip"` 和 `zip_base64`，或者 `source_type: "git"`、`repository` 和 `branch`。上传体上限 48 MiB。最多 10 个非终态任务；源码压缩包总配额 1 GiB，任务磁盘使用仍需操作员监控和卷配额保护。
+创建任务的 JSON 必须包含 `target`、`authorization_confirmed: true`，以及 `source_type: "zip"` 和二进制上传返回的 `upload_id`，或者 `source_type: "git"`、`repository` 和 `branch`。ZIP 最大 256 MiB；旧 Base64 接口仍限制 32 MiB，JSON 请求上限 48 MiB。最多 10 个非终态任务；源码压缩包总配额 4 GiB，任务磁盘使用仍需操作员监控和卷配额保护。
 
 状态：`queued → preparing → running → completed | partial | failed | cancelled`，取消期间为 `cancelling`，无法确认工作流清理时为 `recovering`。只有结构化结果为 completed/partial、退出码 0 且 Markdown 报告存在才认可完成；退出码 0 缺少结果或报告仍是失败。部分完成原因不丢弃。进度是完成/跳过的 Agent 数量，不等于精确耗时百分比。
 
@@ -199,3 +199,14 @@ Worker 标准输出、API 进度/错误/终态中的已知账号、密码、TOTP
 升级已有安装时重新 Analyze/Apply 最新源码并创建/更新到对应 Release，确认实际消费者 Web 服务采用 `SHANNON_EXECUTION_ENABLED=true`、`SHANNON_EXECUTION_MODE=trusted_dev`；不是只更新 Git 仓库或刷新旧 Release。应用 `/shannon-healthz` 和登录后 `/api/v1/config` 都返回执行模式/开关；前端显示“开发内测”及页面提交目标的策略，按钮跟随后端真实开关，不会仅在 UI 解禁。
 
 本轮 25 项 Python 回归包含直接读取根声明启动 HTTP 服务、缺少人工策略变量仍可创建排队任务、未登录拒绝、可选目标限制、两个不同公网目标接收、私网/元数据拒绝、严格模式仍需确认、显式关闭/未知模式保持关闭。Chrome/Playwright 使用本机模拟 SSO、源码和目标验证按钮、ZIP 提交、取消、错误提示及桌面/390px 手机布局。测试执行循环由夹具替换，不访问真实目标或模型；三服务 smoke 显式关闭执行，避免将默认开启扩散到自动化扫描。
+
+
+## 大项目 ZIP 流式上传（2026-11-08）
+
+页面 ZIP 上限提高到 256 MiB，先以 `application/zip` 原始文件请求 `POST /api/v1/uploads`，带确定的 Content-Length；服务每次最多读取 1 MiB，直接落盘，不再把整包转成 Base64/大 JSON。返回 `upload_id`、`size_bytes` 后，创建任务 JSON 使用 `{ "source_type": "zip", "upload_id": "…", ... }`。登录凭据等元数据仍走原任务接口。上传阶段页面显示文件大小和等待提示；非 JSON 的入口 413 会给出入口文件限制提示。
+
+上传接口沿用 4YI SSO、组织及同源校验；临时 ZIP 绑定上传用户、同一上传只能用于一个任务。完整 ZIP 和用户元数据存入本实例数据卷 `uploads/`，服务重启可继续引用；未使用文件两小时过期，后续上传/配额检查清理。任务创建时在同卷原子移动为 `tasks/<id>/source.zip`。中断/无效 ZIP 会清理临时文件；重启遗留的未完成文件按过期策略清理。最多同时两路上传，ZIP 临时文件和任务原始包共用 4 GiB 配额，预留上传大小避免并发突破配额。
+
+兼容旧 `zip_base64` 小包接口（仍限 32 MiB、JSON 请求 48 MiB），大包必须使用二阶段二进制接口；不要将旧 JSON 上限直接扩成几百 MiB。新任务仍进行完整结构检查：解压累计不超过 1 GiB、50000 个条目；路径穿越、符号链接、特殊文件、重复条目和高压缩比限制保留。读取 ZIP 目录前限制其大小为 32 MiB，拒绝分卷及全局 ZIP64 格式，避免恶意目录占满内存。不应把依赖目录、Git 元数据和构建缓存打进源码包。
+
+只读核对 xclaw-router 的代理代码：请求体按流转发，未发现该路由代码显式的较小文件大小上限；仍受部署环境的入口/WAF 和超时设置影响，尚未对线上 4YI 完成 256 MiB 实测。未修改平台代码。测试使用 33 MiB 以上的本地 ZIP 验证超过旧上限及分块读取，并覆盖用户绑定、重启引用、一次消费、超限、配额、并发和中断清理；没有运行真实扫描。

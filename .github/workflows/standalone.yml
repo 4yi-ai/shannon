@@ -19,6 +19,7 @@ jobs:
       - run: npx --yes pnpm@10.33.0 install --frozen-lockfile
       - run: npx --yes pnpm@10.33.0 --filter @shannon/worker run build
       - run: python3 -m unittest apps.standalone.test_standalone -v
+      - run: python3 -B deploy/4yi/temporal/test_diagnostics.py
       - run: node deploy/4yi/test-gateway.mjs
       - run: node deploy/4yi/test-manual-otp.mjs
       - run: node --check apps/standalone/web/app.js

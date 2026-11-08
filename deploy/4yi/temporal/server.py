@@ -47,11 +47,27 @@ def version_tuple(value):
     return tuple(map(int, value.split('.')))
 
 
+def log_database_configuration(environ):
+    # Temporary opt-in development diagnostic. Never dump the full environment.
+    details = {
+        'host': environ.get('POSTGRES_SEEDS', 'shannon-postgres'),
+        'port': environ.get('DB_PORT', '5432'),
+        'user': environ.get('POSTGRES_USER', 'temporal'),
+        'bootstrap_database': 'postgres',
+        'password_configured': bool(environ.get('POSTGRES_PASSWORD')),
+    }
+    if environ.get('SHANNON_DEBUG_DATABASE_CREDENTIALS') == 'true':
+        details['password'] = environ.get('POSTGRES_PASSWORD', '')
+        print('DEV ONLY: raw database credential logging enabled; disable after diagnosis and rotate exposed credential', flush=True)
+    print('Temporal database configuration: ' + json.dumps(details, ensure_ascii=True), flush=True)
+
+
 def main():
     os.umask(0o077)
     mode = sys.argv[1] if len(sys.argv) > 1 else 'start'
     if mode not in ('start', 'migrate'):
         raise SystemExit('Use start (fresh initialization only) or migrate (reviewed schema upgrade)')
+    log_database_configuration(os.environ)
     if not os.environ.get('POSTGRES_PASSWORD'):
         raise SystemExit('Per-install POSTGRES_PASSWORD required')
     host = os.environ.get('POSTGRES_SEEDS', 'shannon-postgres')
@@ -73,6 +89,7 @@ def main():
     while True:
         try:
             query('postgres', 'SELECT 1')
+            print('Temporal database login: succeeded (current configured address, role and password)', flush=True)
             break
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             reason = str(error) if isinstance(error, RuntimeError) else 'database_unavailable'

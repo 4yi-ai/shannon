@@ -19,15 +19,17 @@
         <fieldset class="target-login"><legend>被测网站登录</legend>
           <label class="consent"><input id="login-enabled" type="checkbox"><span>测试需要登录的功能</span></label>
           <div id="login-fields" hidden>
-            <p class="hint">使用已授权的专用测试账号。登录信息会交给当前实例的模型及浏览器执行；不要填写个人或生产管理员账号。支持同源表单登录及 TOTP，暂不支持跨域 SSO、短信或扫码。</p>
+            <p class="hint">使用已授权的专用测试账号。登录信息会交给当前实例的模型及浏览器执行；不要填写个人或生产管理员账号。支持同源表单登录、人工邮箱验证码及 TOTP，暂不支持跨域 SSO、短信或扫码。</p>
             <label for="login-url">登录页面地址</label><input id="login-url" type="url" placeholder="https://example.com/login" maxlength="2048">
             <label for="login-username">测试账号 / 邮箱</label><input id="login-username" autocomplete="off" maxlength="255">
             <label for="login-password">测试密码</label><input id="login-password" type="password" autocomplete="new-password" maxlength="255">
+            <label class="consent"><input id="login-email-code" type="checkbox"><span>登录需要邮箱验证码（人工输入）</span></label>
+            <p class="hint">收到验证码后，在右侧任务详情中输入。每次任务等待最多 5 分钟，不需要提供邮箱密码。</p>
             <label for="login-totp">TOTP 密钥（可选）</label><input id="login-totp" type="password" autocomplete="new-password" maxlength="128" placeholder="Base32 密钥，不是一次性验证码">
             <label for="login-flow">登录步骤（每行一步）</label><textarea id="login-flow" rows="4" maxlength="10000">在账号输入框填写 $username
 在密码输入框填写 $password
 点击登录按钮</textarea>
-            <p class="hint">使用 $username、$password 和 $totp 引用凭据；需要双因素认证时请增加填写 $totp 的步骤。</p>
+            <p class="hint">使用 $username、$password 和 $totp 引用凭据。邮箱验证码由任务等待时人工提交，不要提前写入步骤；可在步骤中注明“等待人工邮箱验证码并完成验证”。</p>
             <label for="login-success-type">登录成功判断</label><select id="login-success-type"><option value="url_contains">地址包含</option><option value="text_contains">页面包含文字</option><option value="url_equals_exactly">地址完全等于</option></select>
             <label for="login-success">成功条件</label><input id="login-success" maxlength="500" placeholder="例如 /dashboard 或 退出登录">
             <p class="hint">会先验证登录，失败则停止扫描。此类任务目前提供脱敏 Markdown 报告。</p>

@@ -20,6 +20,7 @@ jobs:
       - run: npx --yes pnpm@10.33.0 --filter @shannon/worker run build
       - run: python3 -m unittest apps.standalone.test_standalone -v
       - run: node deploy/4yi/test-gateway.mjs
+      - run: node deploy/4yi/test-manual-otp.mjs
       - run: node --check apps/standalone/web/app.js
   images:
     runs-on: ubuntu-latest
@@ -30,4 +31,4 @@ jobs:
       - run: python3 deploy/4yi/smoke.py --web-image shannon-standalone:ci --temporal-image shannon-temporal:ci
       - run: >-
           docker run --rm --entrypoint python3 shannon-standalone:ci -c
-          "import tarfile; t=tarfile.open('/usr/share/shannon/source.tar.gz'); names=set(t.getnames()); assert all(p in names for p in ['./LICENSE', './THIRD_PARTY_NOTICES.md', './pnpm-lock.yaml', './deploy/4yi/Dockerfile', './deploy/4yi/temporal/supervisor.py', './apps/standalone/server.py', './apps/standalone/auth.py', './apps/standalone/target_auth.py', './deploy/4yi/credentials.mjs', './apps/worker/src/temporal/worker.ts', './apps/cli/src/commands/start.ts']); assert not any('/node_modules/' in p or p.endswith('/.env') for p in names)"
+          "import tarfile; t=tarfile.open('/usr/share/shannon/source.tar.gz'); names=set(t.getnames()); assert all(p in names for p in ['./LICENSE', './THIRD_PARTY_NOTICES.md', './pnpm-lock.yaml', './deploy/4yi/Dockerfile', './deploy/4yi/temporal/supervisor.py', './apps/standalone/server.py', './apps/standalone/auth.py', './apps/standalone/target_auth.py', './apps/standalone/manual_otp.py', './apps/worker/src/services/manual-email-code.ts', './deploy/4yi/credentials.mjs', './apps/worker/src/temporal/worker.ts', './apps/cli/src/commands/start.ts']); assert not any('/node_modules/' in p or p.endswith('/.env') for p in names)"

@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from .auth import Access
+from . import manual_otp
 from .runner import Runner, outcome
 from .security import extract_zip, public_url
 from .server import make_handler
@@ -235,6 +236,39 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.request('/api/v1/tasks/'+task['id']+'/reports/pdf')[0],400)
         self.assertNotIn('pdf',self.request('/api/v1/tasks/'+task['id'])[1]['reports'])
 
+    def test_manual_email_code_is_task_bound_encrypted_and_never_returned(self):
+        authentication=dict(LOGIN_FIXTURE,manual_email_code=True,credentials={'username':'fixture','password':'fixture-password'})
+        task=self.store.create({'target':'https://target.example','authenticated_scan':True,'manual_email_code':True})
+        directory=self.runner.directory(task['id']);directory.mkdir(parents=True)
+        vault=CredentialVault(self.store.root);vault.save(directory,authentication)
+        self.store.update(task['id'],state='waiting_for_code')
+        request_id='a'*32
+        (directory/'otp-request.json').write_text(json.dumps({'id':request_id,'expires_at':time.time()+300}))
+        endpoint='/api/v1/tasks/'+task['id']+'/email-code'
+        body={'request_id':request_id,'code':'246810'}
+        self.assertEqual(self.request(endpoint,body,authenticated=False)[0],401)
+        self.assertEqual(self.request(endpoint,body,extra_headers={'Origin':'https://other.example'})[0],403)
+        self.assertEqual(self.request(endpoint,dict(body,request_id='b'*32))[0],400)
+        self.assertEqual(self.request(endpoint,dict(body,code='bad code'))[0],400)
+        self.runner.current=task['id'];self.runner.authentication=authentication
+        self.assertEqual(self.request(endpoint,body),(202,{'accepted':True}))
+        self.assertEqual(redact('246810',self.runner.authentication),'[REDACTED]')
+        self.assertNotIn(b'246810',(directory/'otp-response.enc').read_bytes())
+        self.assertEqual(vault.redaction_auth(directory)['credentials']['manual_code'],'246810')
+        self.assertEqual(self.request(endpoint,body)[0],400)
+        for route in ['/api/v1/tasks','/api/v1/tasks/'+task['id']]:
+            self.assertNotIn('246810',json.dumps(self.request(route)[1]))
+        self.assertNotIn('246810',self.store.db.execute('SELECT body FROM tasks').fetchone()[0])
+        self.assertTrue(self.request('/api/v1/tasks/'+task['id'])[1]['email_challenge']['submitted'])
+        manual_otp.cleanup(directory)
+        (directory/'otp-request.json').write_text(json.dumps({'id':request_id,'expires_at':time.time()-1}))
+        self.assertEqual(self.request(endpoint,body)[0],400)
+        self.store.update(task['id'],state='cancelled')
+        self.assertEqual(self.request(endpoint,body)[0],400)
+        self.runner.finish(self.store.get(task['id']),'cancelled')
+        self.assertFalse((directory/'otp-request.json').exists())
+        self.assertIsNone(self.request('/api/v1/tasks/'+task['id'])[1]['email_challenge'])
+
     def test_disabled_execution_and_invalid_input(self):
         self.runner.enabled = False
         self.assertEqual(self.request('/api/v1/tasks', {})[0], 503)
@@ -264,6 +298,17 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn('fixture-unique-password',store.get(task['id'])['error'])
             self.assertFalse((directory/'login-config.json').exists())
             self.assertTrue((directory/'authentication.enc').exists())
+            store.db.close()
+
+    def test_expired_email_wait_stops_worker_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=Store(tmp);runner=Runner(store,set())
+            task=store.create({'target':'https://target.example'})
+            store.update(task['id'],state='running');runner.current=task['id']
+            (Path(tmp)/'otp-status.json').write_text(json.dumps({'status':'expired'}))
+            code=runner.execute([sys.executable,'-c','import time;time.sleep(30)'],Path(tmp),dict(os.environ),Path(tmp)/'worker.log',10,scan=True)
+            self.assertNotEqual(code,0)
+            self.assertIsNotNone(runner.process.poll())
             store.db.close()
 
     def test_worker_console_redaction(self):

@@ -145,7 +145,8 @@ const preflightActs = proxyActivities<typeof activities>({
 const authValidationActs = proxyActivities<typeof activities>({
   startToCloseTimeout: '10 minutes',
   heartbeatTimeout: '10 minutes',
-  retry: SHORT_RETRY,
+  // A live login must not be repeated automatically after an OTP/provider timeout.
+  retry: { ...SHORT_RETRY, maximumAttempts: 1 },
   cancellationType: ActivityCancellationType.TRY_CANCEL,
 });
 

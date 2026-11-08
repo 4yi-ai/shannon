@@ -10,6 +10,7 @@ from pathlib import Path
 from .security import extract_zip, public_url
 from .store import TERMINAL
 from .models import gateway_config
+from . import manual_otp
 from .target_auth import CredentialVault, redact
 
 PROJECT = Path(__file__).resolve().parents[2]
@@ -90,6 +91,7 @@ class Runner:
                     state, error = 'cancelled', None
                 try:
                     (self.directory(task['id']) / 'login-config.json').unlink(missing_ok=True)
+                    manual_otp.cleanup(self.directory(task['id']))
                     for session in self.directory(task['id']).rglob('auth-state.json'):
                         session.unlink(missing_ok=True)
                 except OSError:
@@ -172,8 +174,11 @@ class Runner:
                 config_path = directory / 'login-config.json'
                 fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, 'w') as config_file:
-                    json.dump({'authentication': self.authentication, 'report': {'guidance': 'Never include passwords, usernames, TOTP secrets, cookies or session tokens in reports. Use placeholders.'}}, config_file)
+                    json.dump({'authentication': {key: value for key, value in self.authentication.items() if key != 'manual_email_code'}, 'report': {'guidance': 'Never include passwords, usernames, TOTP secrets, cookies or session tokens in reports. Use placeholders.'}}, config_file)
                 auth_args = ['--config', str(config_path)]
+                if task.get('manual_email_code'):
+                    env.update(SHANNON_MANUAL_OTP_DIR=str(directory),
+                               SHANNON_MANUAL_OTP_KEY_PATH=str(self.store.root / '.target-credentials-key'))
             code = self.execute(['node', str(PROJECT / 'apps/worker/dist/temporal/worker.js'), task['target'],
                                  str(repo), '--task-queue', 'scan-' + task_id, '--workspace', 'scan_' + task_id,
                                  '--workflow-id', workflow_id, '--output', str(directory / 'reports')] + auth_args,
@@ -184,8 +189,10 @@ class Runner:
                 return
             result = redact(read_json(result_path), self.authentication)
             state = outcome(result, (directory / 'reports/Security-Assessment-Report.md').is_file(), code)
-            self.finish(latest, state, result=result,
-                        error='Scan did not produce a verified terminal result and report' if state == 'failed' else None)
+            error = 'Scan did not produce a verified terminal result and report' if state == 'failed' else None
+            if state == 'failed' and read_json(directory / 'otp-status.json').get('status') == 'expired':
+                error = 'Email verification timed out after 5 minutes; create a new task to retry'
+            self.finish(latest, state, result=result, error=error)
         except Exception as error:
             latest = self.store.get(task_id)
             self.finish(latest, 'cancelled' if latest['state'] == 'cancelling' else 'failed',
@@ -214,9 +221,16 @@ class Runner:
             cancelling_since = None
             while process.poll() is None:
                 if scan:
-                    self.store.update(self.current, progress=redact(read_json(cwd / 'progress.json'), self.authentication))
+                    with self.lock:
+                        latest = self.store.get(self.current)
+                        waiting = manual_otp.challenge(cwd)
+                        changes = {'progress': redact(read_json(cwd / 'progress.json'), self.authentication)}
+                        if latest['state'] in ('running', 'waiting_for_code'):
+                            changes['state'] = 'waiting_for_code' if waiting and waiting['expires_at'] > time.time() else 'running'
+                        self.store.update(self.current, **changes)
                 cancelling = self.stop.is_set() or self.store.get(self.current)['state'] == 'cancelling'
-                if cancelling or time.monotonic() > deadline:
+                otp_failed = scan and read_json(cwd / 'otp-status.json').get('status') in ('expired', 'failed')
+                if cancelling or otp_failed or time.monotonic() > deadline:
                     if cancelling_since is None:
                         cancelling_since = time.monotonic()
                         os.killpg(process.pid, signal.SIGTERM)

@@ -13,6 +13,7 @@
  */
 
 import { readFile, rm } from 'node:fs/promises';
+import path from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { runPiPrompt } from '../ai/pi/pi-executor.js';
@@ -27,6 +28,7 @@ import { ErrorCode } from '../types/errors.js';
 import type { AgentMetrics } from '../types/metrics.js';
 import { err, ok, type Result } from '../types/result.js';
 import { PentestError } from './error-handling.js';
+import { manualEmailCodeTool } from './manual-email-code.js';
 import { loadPrompt } from './prompt-manager.js';
 
 const FAILURE_POINTS = ['username_or_password', 'totp_secret', 'out_of_band'] as const;
@@ -134,7 +136,7 @@ export async function validateAuthentication(
   const stateFile = authStateFile(auditSession.sessionMetadata);
   await rm(stateFile, { force: true });
 
-  const prompt = await loadPrompt(
+  let prompt = await loadPrompt(
     AGENT_NAME,
     { webUrl, repoPath, AUTH_STATE_FILE: stateFile },
     distributedConfig,
@@ -142,6 +144,13 @@ export async function validateAuthentication(
     logger,
     promptDir,
   );
+
+  const otpDirectory = process.env.SHANNON_MANUAL_OTP_DIR;
+  const otpKeyPath = process.env.SHANNON_MANUAL_OTP_KEY_PATH;
+  const emailTools = otpDirectory && otpKeyPath ? [manualEmailCodeTool(otpDirectory, otpKeyPath)] : undefined;
+  if (emailTools) {
+    prompt += '\nMANUAL EMAIL VERIFICATION: After submitting the username/password once and the site sends an email, wait until its code field appears, then call request_email_code exactly once. It pauses for the human operator to enter the code in Shannon. Fill the returned code in that field, submit once and verify the configured success condition. Do not ask for mailbox access, invent a code, retry login, or write the code in reports. On timeout or rejection, submit login_success=false with failure_point=out_of_band. This is a required step in this login flow; preserve the current browser session while waiting.';
+  }
 
   await auditSession.startAgent(AGENT_NAME, attemptNumber);
   const startTime = Date.now();
@@ -155,7 +164,7 @@ export async function validateAuthentication(
     AGENT_NAME,
     auditSession,
     logger,
-    undefined, // callerTools
+    emailTools, // callerTools
     deliverablesSubdir,
     cancellationSignal,
     submitTool,
@@ -163,6 +172,13 @@ export async function validateAuthentication(
   );
 
   let classification = classifyResult(result, authentication);
+  if (classification.ok && emailTools && otpDirectory) {
+    let received = false;
+    try { received = JSON.parse(await readFile(path.join(otpDirectory, 'otp-status.json'), 'utf8')).status === 'received'; } catch { /* missing confirmation fails closed */ }
+    if (!received) {
+      classification = err(new PentestError('Manual email verification was not completed', 'config', false, {}, ErrorCode.AUTH_LOGIN_FAILED));
+    }
+  }
 
   if (classification.ok) {
     const sessionCheck = await verifySavedAuthState(stateFile, logger);

@@ -16,8 +16,10 @@ BRIDGE = Path(__file__).resolve().parents[2] / 'deploy/4yi/credentials.mjs'
 def validate_auth(value, target, origins):
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {'login_type', 'login_url', 'credentials', 'login_flow', 'success_condition'}:
+    if not isinstance(value, dict) or set(value) - {'manual_email_code'} != {'login_type', 'login_url', 'credentials', 'login_flow', 'success_condition'}:
         raise ValueError('Invalid target authentication fields')
+    if 'manual_email_code' in value and not isinstance(value['manual_email_code'], bool):
+        raise ValueError('manual_email_code must be a boolean')
     if value['login_type'] != 'form':
         raise ValueError('This version supports same-origin form login only')
     login_url = public_url(value['login_url'], origins)
@@ -28,6 +30,8 @@ def validate_auth(value, target, origins):
     credentials = value['credentials']
     if not isinstance(credentials, dict) or set(credentials) - {'username', 'password', 'totp_secret'}:
         raise ValueError('Invalid credential fields')
+    if value.get('manual_email_code') and credentials.get('totp_secret'):
+        raise ValueError('Choose either manual email verification or TOTP')
     for field in ('username', 'password'):
         if not isinstance(credentials.get(field), str) or not 1 <= len(credentials[field]) <= 255 or any(c in credentials[field] for c in ('\x00', '\r', '\n')):
             raise ValueError('Target username and password must contain 1–255 characters')
@@ -77,16 +81,32 @@ class CredentialVault:
         except (OSError, subprocess.SubprocessError, ValueError):
             raise ValueError('Target credential storage unavailable') from None
 
+    def write_private(self, file, value):
+        encrypted = self.transform('seal', json.dumps(value).encode())
+        temporary = file.with_name(file.name + '.tmp')
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(encrypted)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, file)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def save(self, directory, authentication):
-        encrypted = self.transform('seal', json.dumps(authentication).encode())
-        fd = os.open(directory / 'authentication.enc', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(encrypted)
-            stream.flush()
-            os.fsync(stream.fileno())
+        self.write_private(directory / 'authentication.enc', authentication)
 
     def load(self, directory):
         return json.loads(self.transform('open', (directory / 'authentication.enc').read_bytes()))
+
+    def redaction_auth(self, directory):
+        authentication = self.load(directory)
+        file = directory / 'otp-redaction.enc'
+        if file.exists():
+            extra = json.loads(self.transform('open', file.read_bytes()))
+            authentication['credentials']['manual_code'] = extra['code']
+        return authentication
 
 
 def redact(value, authentication):

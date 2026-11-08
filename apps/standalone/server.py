@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .auth import Access
+from . import manual_otp
 from .runner import Runner
 from .security import public_url
 from .store import Store
@@ -34,7 +35,7 @@ def make_handler(store, runner, access=None):
             self.connection.settimeout(30)
 
         def view_task(self, task):
-            return dict(task, reports={kind: (runner.directory(task['id']) / 'reports' / filename).is_file()
+            return dict(task, email_challenge=manual_otp.challenge(runner.directory(task['id'])) if task['state'] in ('running', 'waiting_for_code') else None, reports={kind: (runner.directory(task['id']) / 'reports' / filename).is_file()
                                        for kind, (filename, _) in REPORTS.items() if kind != 'pdf' or not task.get('authenticated_scan')})
 
         def log_message(self, fmt, *args):
@@ -109,7 +110,7 @@ def make_handler(store, runner, access=None):
                     if task.get('authenticated_scan'):
                         if report_type == 'pdf':
                             raise ValueError('Authenticated scans currently provide redacted Markdown reports only')
-                        authentication = CredentialVault(store.root).load(runner.directory(task_id))
+                        authentication = CredentialVault(store.root).redaction_auth(runner.directory(task_id))
                         report = redact((runner.directory(task_id) / 'reports' / filename).read_text(), authentication).encode()
                     else:
                         report = (runner.directory(task_id) / 'reports' / filename).read_bytes()
@@ -127,7 +128,19 @@ def make_handler(store, runner, access=None):
             except KeyError:
                 self.send(404, {'error': 'Not found'})
 
+        def read_body(self, maximum=MAX_BODY):
+            if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                raise ValueError('Content-Type must be application/json')
+            length = int(self.headers.get('Content-Length', '0'))
+            if length < 1 or length > maximum or self.headers.get('Transfer-Encoding'):
+                raise ValueError('Invalid request body size')
+            return json.loads(self.rfile.read(length))
+
         def post(self):
+            otp = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/email-code', self.path)
+            if otp:
+                self.send(202, manual_otp.submit(runner, otp[1], self.read_body(2048)))
+                return
             match = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/cancel', self.path)
             if match:
                 self.send(202, runner.cancel(match[1]))
@@ -137,19 +150,15 @@ def make_handler(store, runner, access=None):
             if not runner.enabled:
                 self.send(503, {'error': 'Execution disabled: operator must verify network isolation and configure authorized origins'})
                 return
-            if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-                raise ValueError('Content-Type must be application/json')
-            length = int(self.headers.get('Content-Length', '0'))
-            if length < 1 or length > MAX_BODY or self.headers.get('Transfer-Encoding'):
-                raise ValueError('Request body must be between 1 byte and 48 MiB')
-            body = json.loads(self.rfile.read(length))
+            body = self.read_body()
             if not isinstance(body, dict) or body.get('authorization_confirmed') is not True:
                 raise ValueError('Explicit authorization confirmation is required')
             target = public_url(body.get('target'), runner.origins)
             authentication = validate_auth(body.get('authentication'), target, runner.origins)
             source_type = body.get('source_type')
             task = {'target': target, 'source_type': source_type, 'authorization_confirmed': True,
-                    'authenticated_scan': authentication is not None}
+                    'authenticated_scan': authentication is not None,
+                    'manual_email_code': bool(authentication and authentication.get('manual_email_code'))}
             archive = None
             if source_type == 'zip':
                 archive = base64.b64decode(body.get('zip_base64', ''), validate=True)

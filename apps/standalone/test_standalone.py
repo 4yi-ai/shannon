@@ -421,6 +421,43 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.request('/api/v1/tasks/../../etc/passwd')[0], 404)
 
 
+class DiagnosticsTests(unittest.TestCase):
+    def test_dependency_failures_are_specific_and_do_not_echo_secrets(self):
+        from .diagnostics import temporal_failure
+        import socket
+        from unittest.mock import MagicMock
+        secret = 'private-test-password'
+        with patch.dict(os.environ, {'TEMPORAL_ADDRESS':'temporal:7233'}), patch('apps.standalone.diagnostics.socket.getaddrinfo') as dns, patch('apps.standalone.diagnostics.socket.create_connection') as tcp, patch('apps.standalone.diagnostics.http.client.HTTPConnection') as http:
+            dns.side_effect = socket.gaierror(secret)
+            self.assertIn('无法解析', temporal_failure(secret))
+            dns.side_effect = None
+            tcp.side_effect = ConnectionRefusedError(secret)
+            self.assertIn('端口无法连接', temporal_failure(secret))
+            tcp.side_effect = None
+            response = MagicMock(status=503)
+            http.return_value.getresponse.return_value = response
+            for status, expected in [('database_unavailable','数据库不可用'), ('temporal_starting','进程尚未就绪'), ('ready','gRPC')]:
+                response.status = 200 if status == 'ready' else 503
+                response.read.return_value = json.dumps({'service':'shannon-temporal','status':status}).encode()
+                result = temporal_failure(secret)
+                self.assertIn(expected, result)
+                self.assertNotIn(secret, result)
+            response.read.return_value = b'not-json private-test-password'
+            self.assertNotIn(secret, temporal_failure(secret))
+
+    def test_runner_timeout_uses_safe_diagnostics(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            task = store.create({'target':'https://target.example'})
+            runner = Runner(store, None)
+            with patch('apps.standalone.runner.time.monotonic', side_effect=[0,181]), patch('apps.standalone.runner.subprocess.run', side_effect=subprocess.CalledProcessError(1, ['node'], stderr=b'private-test-password')), patch('apps.standalone.runner.temporal_failure', return_value='服务名无法解析'):
+                with self.assertRaisesRegex(ValueError, '服务名无法解析') as error:
+                    runner.wait_for_temporal(task['id'])
+                self.assertNotIn('private-test-password', str(error.exception))
+            store.db.close()
+
+
 class RunnerTests(unittest.TestCase):
     def test_login_config_reaches_worker_and_is_removed_after_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

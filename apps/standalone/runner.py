@@ -10,6 +10,7 @@ from pathlib import Path
 from .security import extract_zip, public_url
 from .store import TERMINAL
 from .models import gateway_config
+from .diagnostics import temporal_failure
 from . import manual_otp
 from .target_auth import CredentialVault, redact
 
@@ -70,9 +71,12 @@ class Runner:
                 subprocess.run(['node', str(PROJECT / 'deploy/4yi/terminate.mjs'), '--bootstrap'],
                                cwd=PROJECT, check=True, timeout=15, capture_output=True)
                 return
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError) as error:
                 if time.monotonic() >= deadline:
-                    raise ValueError('Temporal did not become ready within 180 seconds')
+                    output = getattr(error, 'stderr', b'') or b''
+                    if isinstance(output, bytes):
+                        output = output.decode('utf-8', errors='replace')
+                    raise ValueError('扫描服务等待 180 秒后仍未就绪。' + temporal_failure(output)) from None
                 self.stop.wait(2)
         raise ValueError('Service stopped or task cancelled before startup')
 

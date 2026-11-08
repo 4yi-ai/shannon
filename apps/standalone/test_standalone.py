@@ -244,6 +244,28 @@ class APITests(unittest.TestCase):
         except urllib.error.HTTPError as response:
             return response.code, json.load(response)
 
+    def test_task_logs_are_authenticated_bounded_and_redacted(self):
+        task = self.store.create({'target':'https://target.example','authenticated_scan':True})
+        directory = self.runner.directory(task['id']);directory.mkdir(parents=True)
+        CredentialVault(self.store.root).save(directory, LOGIN_FIXTURE)
+        (directory/'temporal.log').write_text('ECONNREFUSED fixture-unique-password Bearer secret-token')
+        (directory/'worker.log').write_text('x'*600000 + ' tail-marker')
+        (directory/'unlisted.log').write_text('should-not-be-served')
+        path = '/api/v1/tasks/' + task['id'] + '/logs'
+        self.assertEqual(self.request(path, authenticated=False)[0], 401)
+        status, result = self.request(path)
+        self.assertEqual(status,200)
+        self.assertIn('ECONNREFUSED',result['text'])
+        self.assertIn('tail-marker',result['text'])
+        self.assertIn('512 KiB',result['text'])
+        for secret in ('fixture-unique-password','secret-token','should-not-be-served'):
+            self.assertNotIn(secret,result['text'])
+        self.assertLess(len(result['text']),530000)
+        req=urllib.request.Request(self.url+path+'?download=1',headers=SSO_HEADERS)
+        with urllib.request.urlopen(req) as response:
+            self.assertIn('attachment',response.headers['Content-Disposition'])
+            self.assertIn(b'ECONNREFUSED',response.read())
+
     def test_sso_rejects_missing_identity_wrong_tenant_and_cross_origin(self):
         self.assertEqual(self.request('/api/v1/tasks', authenticated=False,
                          extra_headers={'Authorization':'Bearer '+'x'*64})[0],401)

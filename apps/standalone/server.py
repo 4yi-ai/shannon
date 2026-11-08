@@ -17,6 +17,7 @@ from . import manual_otp
 from .runner import Runner
 from .security import public_url
 from .store import Store
+from .task_logs import read_logs
 from .uploads import Uploads, UploadError, MAX_ZIP_BYTES, LEGACY_ZIP_BYTES
 from .target_auth import CredentialVault, validate_auth, redact
 
@@ -105,6 +106,16 @@ def make_handler(store, runner, access=None):
                 offset = max(0, int(query.get('offset', ['0'])[0]))
                 self.send(200, {'tasks': [self.view_task(task) for task in store.list(limit, offset)], 'limit': limit, 'offset': offset})
             else:
+                log_match = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})/logs', path)
+                if log_match:
+                    task_id = log_match[1]
+                    store.get(task_id)
+                    content = read_logs(store.root, runner.directory(task_id))
+                    if parse_qs(parsed.query).get('download') == ['1']:
+                        self.send(200, content.encode(), 'text/plain; charset=utf-8', 'shannon-task-logs.txt')
+                    else:
+                        self.send(200, {'text': content})
+                    return
                 match = re.fullmatch(r'/api/v1/tasks/([a-f0-9]{32})(?:/reports/(markdown|pdf))?', path)
                 if not match:
                     raise KeyError(path)

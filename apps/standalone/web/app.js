@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const labels = {queued:'排队中',preparing:'准备中',running:'运行中',waiting_for_code:'等待邮箱验证码',recovering:'清理中',cancelling:'取消中',completed:'完成',partial:'部分完成',failed:'失败',cancelled:'已取消'};
 const phases={preflight:'启动检查','auth-validation':'验证登录','pre-recon':'初步侦察',recon:'目标侦察',analysis:'漏洞分析',exploitation:'漏洞验证',report:'报告生成'};
 $('zip').onchange=()=>{uploadedZip={file:null,id:null};$('filename').textContent=$('zip').files[0]?.name||'尚未选择文件';};
+let logOpenTask = null;
 let uploadedZip = {file:null,id:null};
 let emailDraft = {id:null,value:''};
 let config = null, selected = null, sourceType = 'zip', offset = 0, timer = null;
@@ -90,6 +91,13 @@ function renderDetail(task) {
   for(const reason of task.result?.partialReasons||[])root.append(node('p',reason.message||reason.code,'message'));
   const actions=node('div',undefined,'actions'); const cancel=node('button','取消任务');cancel.disabled=['completed','partial','failed','cancelled','cancelling'].includes(task.state);cancel.onclick=async()=>{try{await api('/tasks/'+task.id+'/cancel',{});await refresh();}catch(error){notice(error.message,true);}};actions.append(cancel);
   for(const [type,label] of [['markdown','下载 Markdown'],['pdf','下载 PDF']]){const button=node('button',label,'download');button.disabled=!task.reports?.[type];button.onclick=async()=>{try{const blob=await (await api('/tasks/'+task.id+'/reports/'+type)).blob();const url=URL.createObjectURL(blob);const link=node('a');link.href=url;link.download='Security-Assessment-Report.'+(type==='pdf'?'pdf':'md');link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){notice(error.message,true);}};actions.append(button);}root.append(actions);
+  const logs=node('details');logs.append(node('summary','查看任务日志（脱敏）'));
+  const pre=node('pre','点击展开加载日志');pre.style.whiteSpace='pre-wrap';pre.style.overflowWrap='anywhere';
+  const reload=node('button','刷新日志');reload.type='button';
+  const load=async()=>{try{pre.textContent=(await(await api('/tasks/'+task.id+'/logs')).json()).text;}catch(error){pre.textContent=error.message;}};
+  reload.onclick=load;logs.open=logOpenTask===task.id;logs.ontoggle=()=>{if(!logs.isConnected)return;logOpenTask=logs.open?task.id:null;if(logs.open)load();};
+  const download=node('button','下载任务日志');download.type='button';download.onclick=async()=>{try{const blob=await(await api('/tasks/'+task.id+'/logs?download=1')).blob();const url=URL.createObjectURL(blob);const link=node('a');link.href=url;link.download='shannon-task-logs.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){notice(error.message,true);}};
+  logs.append(reload,download,pre);root.append(logs);
 }
 async function uploadZip(file){
   if(uploadedZip.file===file && uploadedZip.id)return uploadedZip.id;

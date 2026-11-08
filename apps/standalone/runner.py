@@ -11,6 +11,7 @@ from .security import extract_zip, public_url
 from .store import TERMINAL
 from .models import gateway_config
 from .diagnostics import temporal_failure
+from .task_logs import append_temporal
 from . import manual_otp
 from .target_auth import CredentialVault, redact
 
@@ -66,12 +67,19 @@ class Runner:
 
     def wait_for_temporal(self, task_id):
         deadline = time.monotonic() + 180
+        append_temporal(self.directory(task_id), "Temporal bootstrap started", self.authentication)
         while not self.stop.is_set() and self.store.get(task_id)['state'] != 'cancelling':
             try:
                 subprocess.run(['node', str(PROJECT / 'deploy/4yi/terminate.mjs'), '--bootstrap'],
                                cwd=PROJECT, check=True, timeout=15, capture_output=True)
+                append_temporal(self.directory(task_id), 'Temporal bootstrap ready', self.authentication)
                 return
             except (OSError, subprocess.SubprocessError) as error:
+                details = str(error) + '\n'
+                for name in ('stdout', 'stderr'):
+                    value = getattr(error, name, b'') or b''
+                    details += (value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value) + '\n'
+                append_temporal(self.directory(task_id), details, self.authentication)
                 if time.monotonic() >= deadline:
                     output = getattr(error, 'stderr', b'') or b''
                     if isinstance(output, bytes):

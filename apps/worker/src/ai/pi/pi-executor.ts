@@ -46,6 +46,7 @@ import { createProgressManager } from '../progress-manager.js';
 import type { CapturedSubmitTool } from '../submit-tool.js';
 import { permissionSystemConfigExists, permissionSystemPackageDir } from './permission-system.js';
 import { PI_RETRY_SETTINGS } from './retry-settings.js';
+import { retryInterruptedStream } from './stream-retry.js';
 import { createGlobTool, createTodoWriteTool } from './session-tools.js';
 import { createTaskTool } from './task-tool.js';
 import { PI_THINKING_LEVEL } from './thinking-level.js';
@@ -344,6 +345,10 @@ export async function runPiPrompt(
       settingsManager: SettingsManager.inMemory({ retry: PI_RETRY_SETTINGS, compaction: { enabled: true } }),
       resourceLoader,
     }));
+
+    if (selection.model.provider === 'fouryi') {
+      session.agent.streamFunction = retryInterruptedStream(session.agent.streamFunction);
+    }
 
     // Wire activity cancellation to the session now that it exists.
     if (cancellationSignal?.aborted) {

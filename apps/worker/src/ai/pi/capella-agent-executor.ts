@@ -32,6 +32,7 @@ import type {
   CapellaTool,
 } from './capella-agent-types.js';
 import { PI_RETRY_SETTINGS } from './retry-settings.js';
+import { retryInterruptedStream } from './stream-retry.js';
 import { PI_THINKING_LEVEL } from './thinking-level.js';
 
 const MAX_ERROR_LENGTH = 2_000;
@@ -418,6 +419,10 @@ class StandaloneCapellaAgentExecutor implements CapellaAgentExecutor {
           () => undefined,
         );
         throw error;
+      }
+
+      if (selection.model.provider === 'fouryi') {
+        session.agent.streamFunction = retryInterruptedStream(session.agent.streamFunction);
       }
 
       if (controller.signal.aborted) {

@@ -29,6 +29,7 @@ import type { ValidatingSubmitTool } from '../reconciliation/submit-validation.j
 import { ConfinementError, compileRepositoryGlob, RepositoryConfinement } from '../sast/capella/tools/confinement.js';
 import { createCapellaRepositoryTools } from '../sast/capella/tools/repository-tools.js';
 import { PI_RETRY_SETTINGS } from './retry-settings.js';
+import { retryInterruptedStream } from './stream-retry.js';
 import { PI_THINKING_LEVEL } from './thinking-level.js';
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -547,6 +548,10 @@ class StandaloneTaskFormationExecutor implements TaskFormationExecutor {
           () => undefined,
         );
         throw error;
+      }
+
+      if (selection.model.provider === 'fouryi') {
+        session.agent.streamFunction = retryInterruptedStream(session.agent.streamFunction);
       }
 
       if (controller.signal.aborted) {

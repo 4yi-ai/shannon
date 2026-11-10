@@ -19,6 +19,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { type LoggableAgentName, normalizeSemanticLabel } from '../../audit/safe-fields.js';
 import { PI_RETRY_SETTINGS } from './retry-settings.js';
+import { retryInterruptedStream } from './stream-retry.js';
 import { PI_THINKING_LEVEL } from './thinking-level.js';
 import { TraceEmitter } from './trace-emitter.js';
 
@@ -145,6 +146,10 @@ export function createTaskTool(config: TaskToolContext): ToolDefinition {
             compaction: { enabled: true },
           }),
         }));
+
+        if (config.model.provider === 'fouryi') {
+          subSession.agent.streamFunction = retryInterruptedStream(subSession.agent.streamFunction);
+        }
 
         if (config.cancellationSignal?.aborted) {
           abortChildSession();
